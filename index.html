@@ -369,8 +369,9 @@
         <div class="step">
             <div class="step-number">1</div>
             <div class="step-content">
-                <h3>Audio-Based Video/MIDI Sync</h3>
-                <p>Extracts the video's audio track and uses librosa onset detection to find the first significant piano sound. Compares against the MIDI's first note to compute the exact time offset. No hand-motion guessing.</p>
+                <h3>MIDI: Transcribed or Supplied</h3>
+                <p><strong>Supplied MIDI:</strong> Use directly, calculate offset from audio (librosa onset detection).<br>
+                <strong>Auto-transcribed:</strong> Kong piano model analyzes the video's audio in parallel with video processing to generate MIDI with pitch, timing, velocity, and sustain-pedal data. Offset is naturally 0 since MIDI comes from the same audio.</p>
             </div>
         </div>
 
@@ -385,16 +386,24 @@
         <div class="step">
             <div class="step-number">3</div>
             <div class="step-content">
-                <h3>Depth-Invariant Matching</h3>
-                <p>Converts fingertip positions and note pitches to a continuous "white-key index"—matching along the keyboard (left-right), not in raw pixels (which penalizes natural depth spread of fingers).</p>
+                <h3>Parallel Hand Tracking</h3>
+                <p>While MIDI is being transcribed (or immediately if MIDI is supplied), MediaPipe tracks hand landmarks frame-by-frame at 30 FPS. Each frame captures 21 landmark points per hand with 3D coordinates and confidence scores.</p>
             </div>
         </div>
 
         <div class="step">
             <div class="step-number">4</div>
             <div class="step-content">
+                <h3>Depth-Invariant Matching</h3>
+                <p>For each MIDI note onset, interpolate fingertip positions to that exact time. Convert both note pitch and fingertips to a continuous "white-key index"—matching along the keyboard (left-right), not in raw pixels (which penalizes natural depth spread of fingers).</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">5</div>
+            <div class="step-content">
                 <h3>Confidence Scoring</h3>
-                <p>Distance between fingertip and expected key decays confidence (0–1). A match within half a key scores >0.5; one key off scores ~0.3. You can filter by confidence in post-processing.</p>
+                <p>Distance between fingertip and expected key decays confidence (0–1). A match within half a key scores >0.5; one key off scores ~0.3. Chord handling groups simultaneous notes and resolves finger conflicts with greedy nearest-first assignment.</p>
             </div>
         </div>
 
