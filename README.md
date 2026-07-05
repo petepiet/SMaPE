@@ -2,7 +2,9 @@
 
 **Detect piano finger positions from videos.** Given a performance video (hands on keyboard, static camera) and the corresponding MIDI, SMaPE figures out which hand and finger played each note. Ships results in a `.symple` bundle for seamless import into [Symplethesia](https://app.symplethesia.com).
 
-![SMaPE](smape.png)
+<div style="background: #0a0d14; padding: 20px; border-radius: 8px; display: inline-block;">
+  <img src="smape.png" alt="SMaPE Tool" width="500">
+</div>
 
 ## Features
 
