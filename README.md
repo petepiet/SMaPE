@@ -569,3 +569,7 @@ for one-step import with metadata and bundled MIDI.
 - **GitHub:** [github.com/petepiet/SMaPE](https://github.com/petepiet/SMaPE) — report issues, request features
 - **Symplethesia:** [app.symplethesia.com](https://app.symplethesia.com) — the companion piano-learning app
 - **Support the project:** [ko-fi.com/pieterg](https://ko-fi.com/pieterg)
+
+---
+
+**Created by Pieter Geljon**
