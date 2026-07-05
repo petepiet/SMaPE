@@ -1016,7 +1016,15 @@ def analyze(args: argparse.Namespace) -> dict:
 
             from calibration_store import calibration_key
 
-            print("Calibrating from the preview clip while the full video downloads in the background...")
+            print("\n" + "="*70)
+            print(">>> WAITING FOR CALIBRATION <<<")
+            print("="*70)
+            print("An OpenCV window should appear with the video preview.")
+            print("Click on white key centers to calibrate the keyboard.")
+            print("C and G keys are easiest to identify.")
+            print("Need at least 4 points. Press ESC when done.")
+            print("(Full video downloads in the background...)")
+            print("="*70 + "\n")
             calib = _get_or_create_calibration(
                 preview_path, args.calibration, low_pitch, high_pitch,
                 use_cv_calibration=not args.no_cv_calibration,
