@@ -607,11 +607,16 @@ def select_calibration_frame(video_path: str) -> np.ndarray:
     print(f"\n>>> Calibration frame selector window opening...")
     print(f">>> Window: '{window}'")
     print(f">>> If window doesn't appear, check taskbar or use Alt+Tab")
-    print(f">>> Click this window or press ESC to auto-select first frame\n")
+    print(f">>> Click this window or press ESC to auto-select first frame")
+    print(f">>> If no input after 60 seconds, will auto-proceed.\n")
 
     cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)  # Use AUTOSIZE and NORMAL flags
     cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)  # Try to make window stay on top
     selected_frame = None
+
+    import time
+    start_time = time.time()
+    timeout_sec = 60  # Auto-proceed if no input for 60 seconds
 
     while True:
         disp = frame_display.copy()
@@ -622,6 +627,22 @@ def select_calibration_frame(video_path: str) -> np.ndarray:
         cv2.imshow(window, disp)
         key = cv2.waitKeyEx(30)
         key_ascii = key & 0xFF if key != -1 else -1
+
+        # Check for timeout (auto-proceed if no input)
+        if time.time() - start_time > timeout_sec:
+            print(f"\n>>> No input for {timeout_sec}s - auto-selecting first non-black frame...")
+            for i in range(total_frames):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                ok, test_frame = cap.read()
+                if not ok:
+                    break
+                if cv2.cvtColor(test_frame, cv2.COLOR_BGR2GRAY).mean() > 20:
+                    selected_frame = test_frame
+                    print(f"✓ Auto-selected frame {i}")
+                    break
+            if selected_frame is None:
+                selected_frame = frame
+            break
 
         if key == -1:
             continue

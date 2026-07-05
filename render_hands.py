@@ -579,6 +579,10 @@ def interactive_pick_hand_colors(video_path: str) -> dict:
     ARROW_LEFT = {65361, 81, 2424832}
     ARROW_RIGHT = {65363, 83, 2555904}
 
+    import time
+    start_time = time.time()
+    timeout_sec = 60  # Auto-proceed with defaults if no input
+
     while True:
         disp = _display_of(frame)
         y = 40
@@ -596,6 +600,18 @@ def interactive_pick_hand_colors(video_path: str) -> dict:
 
         cv2.imshow(window, disp)
         key = cv2.waitKeyEx(30)
+
+        # Check for timeout (auto-proceed with defaults if no input)
+        if time.time() - start_time > timeout_sec:
+            print(f"\n>>> No colors picked for {timeout_sec}s - using default colors...")
+            # Use default cyan for left, magenta for right
+            if not picks:
+                picks = {
+                    "LH_white": (100, 150, 220),  # cyan-ish for left
+                    "RH_white": (200, 50, 200),   # magenta for right
+                }
+            break
+
         if key == -1:
             continue
         key_ascii = key & 0xFF
