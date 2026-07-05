@@ -628,7 +628,7 @@ def interactive_pick_hand_colors(video_path: str) -> dict:
 
         # Check for timeout (auto-proceed with defaults if no input)
         if time.time() - start_time > timeout_sec:
-            print(f"\n>>> No colors picked for {timeout_sec}s - using default colors...")
+            print(f"\n>>> No colors picked for {timeout_sec}s - using default colors...", flush=True)
             # Use default cyan for left, magenta for right
             if not picks:
                 picks = {
@@ -651,12 +651,12 @@ def interactive_pick_hand_colors(video_path: str) -> dict:
             current_idx = min(total_frames - 1, current_idx + 150)
         elif key_ascii == 112 or key_ascii == 80:  # P or p: proceed
             if not picks:
-                print(">>> No colors picked yet - using defaults (LH white: cyan, RH white: magenta)")
+                print(">>> No colors picked yet - using defaults (LH white: cyan, RH white: magenta)", flush=True)
                 picks = {
                     "LH_white": (100, 150, 220),  # cyan
                     "RH_white": (200, 50, 200),   # magenta
                 }
-            print(f"✓ Proceeding with colors: {picks}")
+            print(f"✓ Proceeding with colors: {picks}", flush=True)
             break
         elif key_ascii == 27:  # ESC
             hands_picked = {_LABEL_TO_HAND[label] for label in picks}

@@ -84,18 +84,18 @@ def transcribe_audio(
     from piano_transcription_inference.utilities import write_events_to_midi
     import time
 
-    print("  Loading audio...")
+    print("  Loading audio...", flush=True)
     audio, sr = librosa.load(audio_path, sr=sample_rate, mono=True)
     audio_duration_sec = len(audio) / sr
-    print(f"  Audio loaded: {audio_duration_sec:.1f} seconds")
+    print(f"  Audio loaded: {audio_duration_sec:.1f} seconds", flush=True)
 
-    print("  Loading transcription model (first run downloads a ~165MB checkpoint)...")
+    print("  Loading transcription model (first run downloads a ~165MB checkpoint)...", flush=True)
     transcriptor = PianoTranscription(device="cpu")
     if onset_threshold is not None:
         transcriptor.onset_threshold = onset_threshold
-        print(f"  Using onset_threshold={onset_threshold} (library default is {DEFAULT_ONSET_THRESHOLD})")
+        print(f"  Using onset_threshold={onset_threshold} (library default is {DEFAULT_ONSET_THRESHOLD})", flush=True)
 
-    print(f"  Transcribing {audio_duration_sec:.1f}s of audio (this can take {audio_duration_sec/60:.0f}-{audio_duration_sec/30:.0f} min on CPU)...")
+    print(f"  Transcribing {audio_duration_sec:.1f}s of audio (this can take {audio_duration_sec/60:.0f}-{audio_duration_sec/30:.0f} min on CPU)...", flush=True)
     start_time = time.time()
     # Pass midi_path=None so the library doesn't write the file itself --
     # we write it ourselves below, AFTER filtering, so the filtered notes
@@ -106,15 +106,15 @@ def transcribe_audio(
     note_events = result["est_note_events"]
     pedal_events = result["est_pedal_events"]
 
-    print(f"✓ Transcription complete: {len(note_events)} notes detected in {elapsed_sec:.1f}s")
+    print(f"✓ Transcription complete: {len(note_events)} notes detected in {elapsed_sec:.1f}s", flush=True)
 
     if min_velocity > 0 or min_duration_sec > 0.0:
         before = len(note_events)
         note_events = filter_note_events(note_events, min_velocity, min_duration_sec)
         dropped = before - len(note_events)
         print(f"  Filtered {dropped}/{before} notes below min_velocity={min_velocity}, "
-              f"min_duration_sec={min_duration_sec} (likely ghost notes)")
+              f"min_duration_sec={min_duration_sec} (likely ghost notes)", flush=True)
 
-    print(f"  Writing {len(note_events)} notes to {out_midi_path}...")
+    print(f"  Writing {len(note_events)} notes to {out_midi_path}...", flush=True)
     write_events_to_midi(start_time=0, note_events=note_events, pedal_events=pedal_events, midi_path=out_midi_path)
-    print(f"✓ MIDI written successfully")
+    print(f"✓ MIDI written successfully", flush=True)
