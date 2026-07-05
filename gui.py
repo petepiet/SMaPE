@@ -658,6 +658,12 @@ class FingeringGUI:
         self.artist_entry = ttk.Entry(meta_form, textvariable=self.artist_var)
         self.artist_entry.grid(row=0, column=1, sticky="ew", padx=8, pady=4)
 
+        # Autofill assumes "Artist - Song" but many titles are "Song - Artist";
+        # this swaps the two fields with one click. Spans both rows.
+        swap_btn = ttk.Button(meta_form, text="⇄", width=3, command=self._swap_artist_title)
+        swap_btn.grid(row=0, column=2, rowspan=2, padx=(0, 0), pady=4)
+        Tooltip(swap_btn, key="swap_artist_title", text="Swap Artist and Title", prefs=self.prefs)
+
         ttk.Label(meta_form, text="Title:").grid(row=1, column=0, sticky="w", padx=0, pady=4)
         self.title_entry = ttk.Entry(meta_form, textvariable=self.title_var)
         self.title_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=4)
@@ -795,6 +801,11 @@ class FingeringGUI:
         self.genre_var.set(genre)
         if detected_difficulty:
             self.difficulty_var.set(detected_difficulty)
+
+    def _swap_artist_title(self):
+        artist, title = self.artist_var.get(), self.title_var.get()
+        self.artist_var.set(title)
+        self.title_var.set(artist)
 
     def _autofill_metadata(self):
         """Auto-fill artist, title, and genre from available sources."""
