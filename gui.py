@@ -529,40 +529,29 @@ class FingeringGUI:
 
         ttk.Label(page, text="What kind of video is this?", style="CardHeading.TLabel").pack(pady=(0, 18))
 
-        buttons_row = ttk.Frame(page, style="Card.TFrame")
-        buttons_row.pack()
-        for mode_key in ("hands", "render", "midi_only"):
-            info = MODES[mode_key]
-            cell = ttk.Frame(buttons_row, style="Card.TFrame")
-            cell.pack(side="left", padx=12)
-            btn = ttk.Button(
-                cell, text=info["title"], style="Mode.TButton",
-                command=lambda m=mode_key: self._select_mode(m),
-            )
-            btn.pack()
-            ttk.Label(
-                cell, text=info["caption"], style="CardMuted.TLabel",
-                wraplength=190, justify="center",
-            ).pack(pady=(8, 0))
-            Tooltip(btn, key=f"mode_{mode_key}", text=info["tooltip"], prefs=self.prefs)
-
-        # Visual image buttons (scaled-down copies of buttons/*.png). The
-        # source PNGs are large (~1254px); Tk's PhotoImage can't smooth-scale,
-        # so use PIL to resize and hand Tk a PNG byte buffer (same ImageTk-free
-        # pattern as the header logo). Skipped entirely without PIL.
+        # One column per mode: bold title on top, clickable image button under
+        # it, muted caption underneath. Grid with uniform columns so the three
+        # spread evenly. The source PNGs are large (~1254px); Tk's PhotoImage
+        # can't smooth-scale, so use PIL to resize and hand Tk a PNG byte
+        # buffer (same ImageTk-free pattern as the header logo) -- without
+        # PIL the title falls back to being the clickable button.
         image_map = {
             "hands": "buttons/pianist.png",
             "render": "buttons/synthesia.png",
             "midi_only": "buttons/video2mid.png",
         }
         self._page2_images = {}  # keep references so Tk doesn't garbage-collect them
-        if _HAS_PIL:
-            image_row = ttk.Frame(page, style="Card.TFrame")
-            image_row.pack(pady=(16, 0))
-            for mode_key in ("hands", "render", "midi_only"):
-                img_path = HERE / image_map[mode_key]
-                if not img_path.exists():
-                    continue
+        buttons_row = ttk.Frame(page, style="Card.TFrame")
+        buttons_row.pack(fill="x")
+        for col, mode_key in enumerate(("hands", "render", "midi_only")):
+            buttons_row.columnconfigure(col, weight=1, uniform="mode")
+            info = MODES[mode_key]
+            cell = ttk.Frame(buttons_row, style="Card.TFrame")
+            cell.grid(row=0, column=col, padx=12, sticky="n")
+
+            img = None
+            img_path = HERE / image_map[mode_key]
+            if _HAS_PIL and img_path.exists():
                 try:
                     pil_img = Image.open(img_path)
                     pil_img.thumbnail((170, 170), Image.LANCZOS)
@@ -570,15 +559,28 @@ class FingeringGUI:
                     pil_img.save(buf, format="PNG")
                     img = tk.PhotoImage(data=buf.getvalue())
                     self._page2_images[mode_key] = img
-                    img_btn = tk.Button(
-                        image_row, image=img, bg=COLOR_CARD, bd=0, cursor="hand2",
-                        command=lambda m=mode_key: self._select_mode(m),
-                        activebackground=COLOR_ACC, highlightthickness=0,
-                    )
-                    img_btn.pack(side="left", padx=12)
-                    Tooltip(img_btn, key=f"mode_img_{mode_key}", text=MODES[mode_key]["tooltip"], prefs=self.prefs)
                 except Exception as e:
                     print(f"Warning: couldn't load {img_path}: {e}", file=sys.stderr)
+
+            if img is not None:
+                ttk.Label(cell, text=info["title"], style="CardHeading.TLabel").pack()
+                btn = tk.Button(
+                    cell, image=img, bg=COLOR_CARD, bd=0, cursor="hand2",
+                    command=lambda m=mode_key: self._select_mode(m),
+                    activebackground=COLOR_ACC, highlightthickness=0,
+                )
+                btn.pack(pady=(14, 0))
+            else:
+                btn = ttk.Button(
+                    cell, text=info["title"], style="Mode.TButton",
+                    command=lambda m=mode_key: self._select_mode(m),
+                )
+                btn.pack()
+            ttk.Label(
+                cell, text=info["caption"], style="CardMuted.TLabel",
+                wraplength=190, justify="center",
+            ).pack(pady=(14, 0))
+            Tooltip(btn, key=f"mode_{mode_key}", text=info["tooltip"], prefs=self.prefs)
 
         ttk.Button(page, text="← Back", command=lambda: self._show_page(1)).pack(anchor="w", pady=(22, 0))
 
