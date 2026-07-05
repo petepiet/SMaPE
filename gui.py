@@ -741,16 +741,20 @@ class FingeringGUI:
 
     def _parse_and_populate_metadata(self, title: str):
         """Parse a title string and populate metadata fields."""
-        # Try to split on common delimiters: " - ", " | ", " by "
+        # YouTube titles often use the fullwidth bar (U+FF5C) because "|" is
+        # not allowed in filenames -- normalize it. Then drop everything after
+        # the first bar: it's almost always channel/branding junk
+        # ("Song - Artist | SomeChannel piano tutorial"), not metadata.
+        title = title.replace("｜", "|")
+        if "|" in title:
+            title = title.split("|", 1)[0].strip()
+
+        # Try to split what's left on common delimiters: " - ", " by "
         artist = ""
         song_title = ""
 
         if " - " in title:
             parts = title.split(" - ", 1)
-            artist = parts[0].strip()
-            song_title = parts[1].strip()
-        elif " | " in title:
-            parts = title.split(" | ", 1)
             artist = parts[0].strip()
             song_title = parts[1].strip()
         elif " by " in title:
@@ -1414,17 +1418,26 @@ class FingeringGUI:
                 kind, payload = self.log_queue.get_nowait()
                 if kind == "line":
                     self._log(payload)
-                    # Extract video title from download log line
-                    if not self.extracted_video_title and "[download]" in payload and ".mp4 has" in payload:
-                        # Pattern: "[download] /path/to/Title Here.mp4 has already been downloaded"
-                        # Extract the filename between last "/" and the file extension
+                    # Extract video title from a yt-dlp download log line. Two
+                    # patterns, depending on whether the file is fresh or cached:
+                    #   "[download] Destination: /path/Title Here.mp4"
+                    #   "[download] /path/Title Here.mp4 has already been downloaded"
+                    if (
+                        not self.extracted_video_title
+                        and "[download]" in payload
+                        and ".mp4" in payload
+                        and ("Destination:" in payload or "has already been downloaded" in payload)
+                    ):
                         try:
                             start = payload.rfind("/") + 1
                             end = payload.find(".mp4")
                             if start > 0 and end > start:
-                                self.extracted_video_title = payload[start:end]
-                                # Auto-populate metadata from extracted title
-                                self._autofill_from_extracted_title()
+                                title = payload[start:end]
+                                # The 20s calibration clip downloads as
+                                # "preview.mp4" -- not the video's title.
+                                if title and title.lower() != "preview":
+                                    self.extracted_video_title = title
+                                    self._autofill_from_extracted_title()
                         except Exception:
                             pass
                 elif kind == "done":
