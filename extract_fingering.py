@@ -327,9 +327,10 @@ def _download_if_url(video: str, download_dir: str) -> tuple:
         video_path = ydl.prepare_filename(info)
     channel_id = info.get("channel_id") or info.get("uploader_id")
 
-    # Prefer MP3 to avoid M4A container fixing delays. yt-dlp will try each in order.
-    # Note: if neither MP3 nor M4A is available, falls back to any audio format.
-    audio_opts = dict(base_opts, format="best[ext=mp3]/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio")
+    # Prefer MP3; explicitly skip M4A to avoid FixupM4a hanging delays.
+    # yt-dlp's M4A container fixing post-processor can hang indefinitely.
+    # If MP3 unavailable, fall back to any audio format except M4A.
+    audio_opts = dict(base_opts, format="best[ext=mp3]/bestaudio[ext=mp3]/bestaudio[ext!=m4a]/bestaudio")
     with yt_dlp.YoutubeDL(audio_opts) as ydl:
         audio_info = ydl.extract_info(video, download=True)
         audio_path = ydl.prepare_filename(audio_info)
