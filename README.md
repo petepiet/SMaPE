@@ -1,24 +1,43 @@
-# Symple Midi and Playstyle Extractor (SMaPE)
+# SMaPE — Symple Midi and Playstyle Extractor
 
-Standalone dev tool (`tools/piano-fingering/`, module names kept for
-compatibility): given a near-overhead video of a real acoustic-piano
-performance (hands + full keyboard visible, static camera) and the **exact
-same performance's** MIDI (extracted from that recording), figure out which
-hand (L/R) and which finger (1-5, thumb-pinky) played each MIDI note. Also
-handles Synthesia-style renders (hand-only, see "Synthesia-render support"
-below) and plain MIDI-only extraction with no video analysis at all (see
-`--midi-only`). Besides the fingering JSON, every run also writes a
-**`.symple` bundle** (MIDI + fingering JSON zipped together, see "Output
-bundle" below) so the whole result can be opened in Symplethesia in one
-step, instead of importing the MIDI and separately picking a fingering JSON
-through the dev-only importer.
+**Extract piano fingering from videos.** Given a performance video (hands on keyboard, static camera) and the corresponding MIDI, SMaPE figures out which hand and finger played each note. Ships results in a `.symple` bundle for seamless import into [Symplethesia](https://app.symplethesia.com).
+
+![SMaPE](smape.png)
+
+## Features
+
+- **Fingering extraction:** Detects hand/finger for each MIDI note via hand tracking (MediaPipe)
+- **Video transcription:** No MIDI file? Generate one from audio using Kong high-res piano transcription model
+- **Synthesia support:** Handles rendered keyboard videos with hand colors instead of real hands
+- **Metadata & bundles:** Auto-fill song metadata (Artist, Title, Genre, Difficulty) and export as shareable `.symple` bundles
+- **Interactive calibration:** Click a few keys (C/G) to calibrate the keyboard; accuracy improves with more points
+- **Sync alignment:** See/hear the alignment with MIDI playback before committing to the slow hand-tracking phase
+- **Desktop GUI:** Tkinter-based interface; no dependencies beyond Python stdlib for launching
+- **Extensible output:** MIDI + fingering JSON bundled together for one-step import into Symplethesia
+
+## Quick Start
+
+```bash
+# Install dependencies (venv required on Debian/Ubuntu — see "Install" section)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Run the GUI
+python3 gui.py
+```
+
+Or, command-line mode:
+
+```bash
+python3 extract_fingering.py --video performance.mp4 --midi performance.mid --out fingering.json
+```
 
 The video is only used to answer "which finger is on the key at each known
 onset" -- the MIDI already gives exact pitch and timing. This is **not**
 blind audio/video transcription... unless you pass `--transcribe`, which
 generates the MIDI from the video's own audio using a piano-specific AMT
-(automatic music transcription) model, for when you don't have (or don't want
-to separately find) an exact-performance MIDI. See "Transcription" below.
+(automatic music transcription) model. See ["Transcription"](#transcription---transcribe) below.
 
 ## Install
 
@@ -432,6 +451,15 @@ importing the MIDI and using "Import fingering analysis (dev)" separately,
 but one step. If the wizard is cancelled or the import fails, the fingering
 is not applied (and nothing in the previously-open song is touched).
 
+## Recent Improvements
+
+- **Metadata support:** Song metadata (Artist, Title, Genre, Difficulty) is now stored in `.symple` bundles and imported directly into Symplethesia
+- **Auto-fill metadata:** Extracts song info from video titles intelligently (supports "Artist - Song" patterns)
+- **Better feedback:** Progress messages show what the tool is doing at each phase (download, calibration, transcription)
+- **Enhanced UI:** Dialogs auto-fit to screen size; frame navigation with Page Up/Page Down (±150 frames)
+- **Octave shifting:** Shift the entire keyboard calibration overlay by octave (< / > keys) when auto-detection is off by one
+- **Disclaimers:** Each bundle includes accuracy notes and links to GitHub and Symplethesia
+
 ## GUI
 
 A small desktop GUI (`gui.py`) wraps the CLI above so you don't have to
@@ -462,8 +490,7 @@ windows can pop up and behave normally.
 
 ### Flow
 
-The GUI is a 3-step wizard, styled to match the main Symplethesia app's dark
-theme:
+The GUI is a multi-step wizard, styled to match the main Symplethesia app's dark theme:
 
 1. **Video** -- paste a YouTube (or yt-dlp-supported) URL, **Open file...**
    to browse (defaults to `~/Downloads`), or drag a local file onto the
@@ -478,14 +505,15 @@ theme:
      support" below.
    - **Extract MIDI only** -- transcribes MIDI from audio and stops there;
      no calibration, no hand/finger analysis (`--midi-only`).
-3. **Run** -- the MIDI-file field only appears here for "Piano player" mode.
+3. **Metadata** -- fill in song information (Artist, Title, Genre, Difficulty). The **Auto-fill** button parses the video title to populate these fields automatically. Click **Next →**.
+4. **Run** -- the MIDI-file field only appears here for "Piano player" mode.
    Click **Run**; stdout/stderr streams live into the scrollable log box.
    Click **Stop** to terminate a running analysis. When the process exits,
    the status line turns green with `Done -- wrote <path>` on success, or
    red with the failure/exit code on error (full details remain in the log
    above). "Open output folder" opens the output JSON's containing folder
-   in your file manager. **← Back** returns to the mode-selection screen at
-   any point.
+   in your file manager. **← Back** returns to previous screens at
+   any point. **↻ Restart** returns to the video selection screen.
 
 A tooltip's **Don't show this again** checkbox persists across launches (in
 `.gui_prefs.json`, next to `gui.py`, gitignored).
@@ -532,3 +560,12 @@ Symplethesia app with the dev flag on (`?dev=1` in the URL, or
 this tool. It joins each JSON note to a project note by exact pitch match +
 nearest `note.start` within `ppq/8` ticks, then applies hand + finger
 assignments in two undo steps.
+
+Alternatively, open the `.symple` bundle directly in Symplethesia (File → Open)
+for one-step import with metadata and bundled MIDI.
+
+## Support & Feedback
+
+- **GitHub:** [github.com/petepiet/SMaPE](https://github.com/petepiet/SMaPE) — report issues, request features
+- **Symplethesia:** [app.symplethesia.com](https://app.symplethesia.com) — the companion piano-learning app
+- **Support the project:** [ko-fi.com/pieterg](https://ko-fi.com/pieterg)
