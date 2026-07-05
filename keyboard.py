@@ -604,7 +604,13 @@ def select_calibration_frame(video_path: str) -> np.ndarray:
     else:
         frame_display = frame.copy()
 
-    cv2.namedWindow(window)
+    print(f"\n>>> Calibration frame selector window opening...")
+    print(f">>> Window: '{window}'")
+    print(f">>> If window doesn't appear, check taskbar or use Alt+Tab")
+    print(f">>> Click this window or press ESC to auto-select first frame\n")
+
+    cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)  # Use AUTOSIZE and NORMAL flags
+    cv2.setWindowProperty(window, cv2.WND_PROP_TOPMOST, 1)  # Try to make window stay on top
     selected_frame = None
 
     while True:
