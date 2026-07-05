@@ -1,19 +1,19 @@
 # SMaPE — Symple Midi and Playstyle Extractor
 
-**Extract piano fingering from videos.** Given a performance video (hands on keyboard, static camera) and the corresponding MIDI, SMaPE figures out which hand and finger played each note. Ships results in a `.symple` bundle for seamless import into [Symplethesia](https://app.symplethesia.com).
+**Detect piano finger positions from videos.** Given a performance video (hands on keyboard, static camera) and the corresponding MIDI, SMaPE figures out which hand and finger played each note. Ships results in a `.symple` bundle for seamless import into [Symplethesia](https://app.symplethesia.com).
 
 ![SMaPE](smape.png)
 
 ## Features
 
-- **Fingering extraction:** Detects hand/finger for each MIDI note via hand tracking (MediaPipe)
+- **Finger position detection:** Detects hand/finger for each MIDI note via hand tracking (MediaPipe)
 - **Video transcription:** No MIDI file? Generate one from audio using Kong high-res piano transcription model
 - **Synthesia support:** Handles rendered keyboard videos with hand colors instead of real hands
 - **Metadata & bundles:** Auto-fill song metadata (Artist, Title, Genre, Difficulty) and export as shareable `.symple` bundles
 - **Interactive calibration:** Click a few keys (C/G) to calibrate the keyboard; accuracy improves with more points
 - **Sync alignment:** See/hear the alignment with MIDI playback before committing to the slow hand-tracking phase
 - **Desktop GUI:** Tkinter-based interface; no dependencies beyond Python stdlib for launching
-- **Extensible output:** MIDI + fingering JSON bundled together for one-step import into Symplethesia
+- **Extensible output:** MIDI + finger position data bundled together for one-step import into Symplethesia
 
 ## Quick Start
 
@@ -458,7 +458,7 @@ is not applied (and nothing in the previously-open song is touched).
 - **Better feedback:** Progress messages show what the tool is doing at each phase (download, calibration, transcription)
 - **Enhanced UI:** Dialogs auto-fit to screen size; frame navigation with Page Up/Page Down (±150 frames)
 - **Octave shifting:** Shift the entire keyboard calibration overlay by octave (< / > keys) when auto-detection is off by one
-- **Disclaimers:** Each bundle includes accuracy notes and links to GitHub and Symplethesia
+- **Finger position accuracy:** Each bundle includes accuracy notes and links to GitHub and Symplethesia
 
 ## GUI
 
