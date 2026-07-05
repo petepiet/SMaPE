@@ -575,6 +575,31 @@ class CalibPoint:
             raise ValueError(f"{self.pitch} is not a white key")
 
 
+def _show_proceed_dialog(title: str, message: str) -> None:
+    """Show a Tkinter dialog with a Proceed button to confirm next step."""
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.withdraw()
+    dialog = tk.Toplevel(root)
+    dialog.title(title)
+    dialog.resizable(False, False)
+
+    # Message
+    label = tk.Label(dialog, text=message, font=("Arial", 12), padx=20, pady=20)
+    label.pack()
+
+    # Proceed button
+    def on_proceed():
+        dialog.destroy()
+        root.destroy()
+
+    btn = tk.Button(dialog, text="✓ Proceed", font=("Arial", 12), padx=20, pady=10, command=on_proceed)
+    btn.pack(pady=10)
+
+    dialog.wait_window()
+
+
 def select_calibration_frame(video_path: str) -> np.ndarray:
     """Let the user scrub through the video to find a good frame for calibration
     (skip black/faded frames at the start). Returns the selected frame as a numpy BGR array."""
@@ -690,6 +715,10 @@ def select_calibration_frame(video_path: str) -> np.ndarray:
 
     cap.release()
     cv2.destroyWindow(window)
+
+    # Show confirmation dialog with Proceed button
+    _show_proceed_dialog("Calibration Complete", "Frame calibration done.\nReady to proceed to hand color picking?")
+
     return selected_frame
 
 

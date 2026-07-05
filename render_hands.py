@@ -460,6 +460,31 @@ def sample_notes(video_path: str, calib, notes: Sequence, fps: float = 30.0, loo
     return results
 
 
+def _show_proceed_dialog(title: str, message: str) -> None:
+    """Show a Tkinter dialog with a Proceed button to confirm next step."""
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.withdraw()
+    dialog = tk.Toplevel(root)
+    dialog.title(title)
+    dialog.resizable(False, False)
+
+    # Message
+    label = tk.Label(dialog, text=message, font=("Arial", 11), padx=20, pady=20)
+    label.pack()
+
+    # Proceed button
+    def on_proceed():
+        dialog.destroy()
+        root.destroy()
+
+    btn = tk.Button(dialog, text="✓ Proceed to Analysis", font=("Arial", 12), padx=20, pady=10, command=on_proceed)
+    btn.pack(pady=10)
+
+    dialog.wait_window()
+
+
 def interactive_pick_hand_colors(video_path: str) -> dict:
     """Let the user scrub through `video_path` and click directly on lit keys
     to manually specify the four hand/key-type reference colors (see
@@ -650,4 +675,8 @@ def interactive_pick_hand_colors(video_path: str) -> dict:
 
     cap.release()
     cv2.destroyWindow(window)
+
+    # Show confirmation dialog with Proceed button
+    _show_proceed_dialog("Hand Colors Complete", f"Hand colors saved:\n{picks}\n\nReady to proceed to analysis?")
+
     return picks
