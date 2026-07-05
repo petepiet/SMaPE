@@ -55,9 +55,18 @@
         }
 
         .logo {
+            display: flex;
+            align-items: center;
+            gap: 15px;
             font-size: 1.5em;
             font-weight: 700;
             color: #fff;
+            text-decoration: none;
+        }
+
+        .logo img {
+            height: 50px;
+            width: auto;
         }
 
         nav a {
@@ -447,7 +456,10 @@
     <!-- Header -->
     <header>
         <div class="container">
-            <div class="logo">SMaPE</div>
+            <a href="#top" class="logo">
+                <img src="smape.png" alt="SMaPE">
+                <span>SMaPE</span>
+            </a>
             <nav>
                 <a href="#workflow">Workflow</a>
                 <a href="#output">Output</a>
@@ -461,8 +473,8 @@
     <!-- Hero -->
     <section class="hero">
         <div class="container">
-            <h1>Detect piano <span class="brand-text">finger positions</span> from videos</h1>
-            <p class="lead">Generate MIDI from audio. Detect hand and finger positions. Create shareable bundles for Symplethesia — all in one tool.</p>
+            <h1>Generate MIDI from audio and extract hands and <span class="brand-text">finger positions</span> from video</h1>
+            <p class="lead">Create shareable bundles for Symplethesia — all in one tool.</p>
             <div class="hero-buttons">
                 <a href="https://github.com/petepiet/SMaPE" class="btn btn-primary">GitHub Repository</a>
                 <a href="https://ko-fi.com/pieterg" class="btn btn-secondary">Support on Ko-Fi</a>
