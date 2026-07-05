@@ -150,6 +150,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output JSON path (default: <midi-directory>/<midi-basename>.fingering.json)",
     )
+    p.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory for fingering.json and .symple bundle (default: same as --out or --midi directory)",
+    )
     p.add_argument("--offset", type=float, default=None, help="Manual video-vs-MIDI offset in seconds (video_time = midi_time + offset). Overrides auto-estimate.")
     # Keyboard range is auto-derived from the MIDI by default. With C/G-key
     # calibration it no longer affects the mapping (only the overlay extent),
@@ -1073,6 +1078,13 @@ def analyze(args: argparse.Namespace) -> dict:
 
     if args.out is None:
         args.out = default_out_path(args.midi) if args.midi else default_out_path_from_video(video_path)
+
+    # Apply output directory override if specified
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+        basename = os.path.basename(args.out)
+        args.out = os.path.join(args.output_dir, basename)
+        print(f"Output directory set to: {args.output_dir}")
 
     # Manual hand-color picking only needs SOME representative video to
     # scrub/click, not any MIDI/transcription/calibration output -- normally

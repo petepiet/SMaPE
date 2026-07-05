@@ -292,6 +292,7 @@ class FingeringGUI:
         self.render_var = tk.BooleanVar(value=False)
         self.midi_only_var = tk.BooleanVar(value=False)
         self.out_var = tk.StringVar(value="")
+        self.output_dir_var = tk.StringVar(value="")
         self.fps_var = tk.StringVar(value="20")
         self.align_var = tk.BooleanVar(value=True)
         self.preview_var = tk.BooleanVar(value=False)
@@ -904,6 +905,11 @@ class FingeringGUI:
         ttk.Button(adv, text="Browse...", command=self._browse_out).grid(row=arow, column=2, **pad)
         arow += 1
 
+        ttk.Label(adv, text="Output Directory:").grid(row=arow, column=0, sticky="w", **pad)
+        ttk.Entry(adv, textvariable=self.output_dir_var).grid(row=arow, column=1, sticky="ew", **pad)
+        ttk.Button(adv, text="Browse...", command=self._browse_output_dir).grid(row=arow, column=2, **pad)
+        arow += 1
+
         offset_label = ttk.Label(adv, text="Offset (sec, blank = auto):")
         offset_label.grid(row=arow, column=0, sticky="w", **pad)
         offset_entry = ttk.Entry(adv, textvariable=self.offset_var, width=12)
@@ -1151,6 +1157,11 @@ class FingeringGUI:
         if path:
             self.out_var.set(path)
 
+    def _browse_output_dir(self):
+        path = filedialog.askdirectory(title="Output directory for fingering.json and .symple bundle")
+        if path:
+            self.output_dir_var.set(path)
+
     def _on_drop_video(self, event):
         self.video_var.set(_strip_dnd_braces(event.data))
 
@@ -1258,6 +1269,10 @@ class FingeringGUI:
         out = self.out_var.get().strip()
         if out:
             argv += ["--out", out]
+
+        output_dir = self.output_dir_var.get().strip()
+        if output_dir:
+            argv += ["--output-dir", output_dir]
 
         if self.transcribe_var.get():
             argv.append("--transcribe")
