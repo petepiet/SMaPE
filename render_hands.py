@@ -586,9 +586,9 @@ def interactive_pick_hand_colors(video_path: str) -> dict:
     while True:
         disp = _display_of(frame)
         y = 40
-        cv2.putText(disp, f"Frame {current_idx}/{total_frames} | Arrows: ±10 | PgUp/PgDn: ±150 | click a lit key | ESC: done",
+        cv2.putText(disp, f"Frame {current_idx}/{total_frames} | Arrows: ±10 | PgUp/PgDn: ±150 | click a lit key | P: proceed | ESC: done",
                     (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(disp, f"Frame {current_idx}/{total_frames} | Arrows: ±10 | PgUp/PgDn: ±150 | click a lit key | ESC: done",
+        cv2.putText(disp, f"Frame {current_idx}/{total_frames} | Arrows: ±10 | PgUp/PgDn: ±150 | click a lit key | P: proceed | ESC: done",
                     (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 1, cv2.LINE_AA)
         for label in HAND_COLOR_LABELS:
             y += 32
@@ -624,6 +624,15 @@ def interactive_pick_hand_colors(video_path: str) -> dict:
             current_idx = max(0, current_idx - 150)
         elif key in {65366, 2621440}:  # PAGEDOWN
             current_idx = min(total_frames - 1, current_idx + 150)
+        elif key_ascii == 112 or key_ascii == 80:  # P or p: proceed
+            if not picks:
+                print(">>> No colors picked yet - using defaults (LH white: cyan, RH white: magenta)")
+                picks = {
+                    "LH_white": (100, 150, 220),  # cyan
+                    "RH_white": (200, 50, 200),   # magenta
+                }
+            print(f"✓ Proceeding with colors: {picks}")
+            break
         elif key_ascii == 27:  # ESC
             hands_picked = {_LABEL_TO_HAND[label] for label in picks}
             if "L" in hands_picked and "R" in hands_picked:

@@ -166,7 +166,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "minutes for the full video+audio download and ffmpeg mux to finish first. The full download still "
         "happens (in the background, overlapping with the time you spend calibrating) and the pipeline "
         "continues with it once both finish. Tradeoff: 'scrub to a good frame' can only scrub within this "
-        "preview window, not the whole video -- 20s (default) is chosen to skip past a typical ~10s channel "
+        "preview window, not the whole video -- 45s (default) is chosen to skip past channel "
         "intro while still being a fast download. Set to 0 to disable and always wait for the full download "
         "first (the old sequential behavior). Ignored for a local file --video (no download to hide behind). "
         "With --transcribe (no MIDI yet at calibration time), calibration uses the full 88-key range "
@@ -338,7 +338,7 @@ def _download_if_url(video: str, download_dir: str) -> tuple:
     return video_path, audio_path, channel_id
 
 
-def _download_preview(video_url: str, download_dir: str, seconds: float = 20) -> tuple:
+def _download_preview(video_url: str, download_dir: str, seconds: float = 45) -> tuple:
     """Fetches only the first ``seconds`` of ``video_url`` -- a small, fast
     download meant purely to unblock the interactive calibration window
     (`_get_or_create_calibration`/`select_calibration_frame`) while the real,

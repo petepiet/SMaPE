@@ -620,7 +620,7 @@ def select_calibration_frame(video_path: str) -> np.ndarray:
 
     while True:
         disp = frame_display.copy()
-        text = f"Frame {current_idx}/{total_frames} | Arrows: ±10 | PgUp/PgDn: ±150 | SPACE: confirm | ESC: auto"
+        text = f"Frame {current_idx}/{total_frames} | Arrows: ±10 | PgUp/PgDn: ±150 | SPACE: confirm | P: proceed | ESC: auto"
         cv2.putText(disp, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
         cv2.putText(disp, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 1, cv2.LINE_AA)
 
@@ -659,6 +659,10 @@ def select_calibration_frame(video_path: str) -> np.ndarray:
             current_idx = min(total_frames - 1, current_idx + 150)
         elif key_ascii == 32:  # SPACE: confirm this frame
             selected_frame = frame
+            break
+        elif key_ascii == 112 or key_ascii == 80:  # P or p: proceed with current frame
+            selected_frame = frame
+            print(f"✓ Proceeding with frame {current_idx}")
             break
         elif key_ascii == 27:  # ESC: auto-find first non-black frame
             for i in range(total_frames):
