@@ -546,28 +546,37 @@ class FingeringGUI:
             ).pack(pady=(8, 0))
             Tooltip(btn, key=f"mode_{mode_key}", text=info["tooltip"], prefs=self.prefs)
 
-        # Visual image buttons
+        # Visual image buttons (scaled-down copies of buttons/*.png). The
+        # source PNGs are large (~1254px); Tk's PhotoImage can't smooth-scale,
+        # so use PIL to resize and hand Tk a PNG byte buffer (same ImageTk-free
+        # pattern as the header logo). Skipped entirely without PIL.
         image_map = {
             "hands": "buttons/pianist.png",
             "render": "buttons/synthesia.png",
             "midi_only": "buttons/video2mid.png",
         }
-        image_row = ttk.Frame(page, style="Card.TFrame")
-        image_row.pack(pady=(16, 0))
-
-        self._page2_images = {}  # Store references so images don't get garbage collected
-        for mode_key in ("hands", "render", "midi_only"):
-            img_path = HERE / image_map[mode_key]
-            if img_path.exists():
+        self._page2_images = {}  # keep references so Tk doesn't garbage-collect them
+        if _HAS_PIL:
+            image_row = ttk.Frame(page, style="Card.TFrame")
+            image_row.pack(pady=(16, 0))
+            for mode_key in ("hands", "render", "midi_only"):
+                img_path = HERE / image_map[mode_key]
+                if not img_path.exists():
+                    continue
                 try:
-                    img = tk.PhotoImage(file=str(img_path))
+                    pil_img = Image.open(img_path)
+                    pil_img.thumbnail((170, 170), Image.LANCZOS)
+                    buf = io.BytesIO()
+                    pil_img.save(buf, format="PNG")
+                    img = tk.PhotoImage(data=buf.getvalue())
                     self._page2_images[mode_key] = img
                     img_btn = tk.Button(
-                        image_row, image=img, bg=COLOR_BG, bd=0, cursor="hand2",
+                        image_row, image=img, bg=COLOR_CARD, bd=0, cursor="hand2",
                         command=lambda m=mode_key: self._select_mode(m),
-                        activebackground=COLOR_ACC,
+                        activebackground=COLOR_ACC, highlightthickness=0,
                     )
-                    img_btn.pack(side="left", padx=8)
+                    img_btn.pack(side="left", padx=12)
+                    Tooltip(img_btn, key=f"mode_img_{mode_key}", text=MODES[mode_key]["tooltip"], prefs=self.prefs)
                 except Exception as e:
                     print(f"Warning: couldn't load {img_path}: {e}", file=sys.stderr)
 
