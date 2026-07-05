@@ -32,6 +32,13 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Line-buffer stdout even when it's a pipe (e.g. run as the GUI's subprocess).
+# Without this, prints from third-party libraries (like Kong's per-segment
+# "Segment X / Y" transcription progress) sit invisible in Python's block
+# buffer for the entire run, making long phases look hung.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 # Silence noisy-but-harmless native-library logging that looks alarming but
 # reflects nothing actually wrong (the pipeline works fine underneath it).
 # Harmless to set unconditionally even when --selftest never imports the

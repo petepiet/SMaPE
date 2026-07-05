@@ -79,10 +79,22 @@ def transcribe_audio(
                            transcription -- tracking blips tend to be very
                            short.
     """
+    import os
     import librosa  # already a dependency (used for audio-onset sync too)
+    import torch
     from piano_transcription_inference import PianoTranscription, sample_rate
     from piano_transcription_inference.utilities import write_events_to_midi
     import time
+
+    # Kong's model is GRU-heavy, and GRUs on CPU are hurt (not helped) by
+    # many threads: on hybrid P/E-core CPUs (e.g. i5-1235U) PyTorch's default
+    # of one thread per logical core makes every parallel section wait for
+    # the slowest E-core at each sync point. Empirically observed making a
+    # ~4-min job take hours. Cap at 4 threads unless the user overrides via
+    # TORCH_NUM_THREADS.
+    num_threads = int(os.environ.get("TORCH_NUM_THREADS", "0")) or min(4, os.cpu_count() or 4)
+    torch.set_num_threads(num_threads)
+    print(f"  Using {num_threads} CPU threads for inference (override with TORCH_NUM_THREADS)", flush=True)
 
     print("  Loading audio...", flush=True)
     audio, sr = librosa.load(audio_path, sr=sample_rate, mono=True)
