@@ -82,8 +82,12 @@ def transcribe_audio(
     import librosa  # already a dependency (used for audio-onset sync too)
     from piano_transcription_inference import PianoTranscription, sample_rate
     from piano_transcription_inference.utilities import write_events_to_midi
+    import time
 
-    audio, _ = librosa.load(audio_path, sr=sample_rate, mono=True)
+    print("  Loading audio...")
+    audio, sr = librosa.load(audio_path, sr=sample_rate, mono=True)
+    audio_duration_sec = len(audio) / sr
+    print(f"  Audio loaded: {audio_duration_sec:.1f} seconds")
 
     print("  Loading transcription model (first run downloads a ~165MB checkpoint)...")
     transcriptor = PianoTranscription(device="cpu")
@@ -91,14 +95,18 @@ def transcribe_audio(
         transcriptor.onset_threshold = onset_threshold
         print(f"  Using onset_threshold={onset_threshold} (library default is {DEFAULT_ONSET_THRESHOLD})")
 
-    print("  Transcribing (this can take a minute or two on CPU)...")
+    print(f"  Transcribing {audio_duration_sec:.1f}s of audio (this can take {audio_duration_sec/60:.0f}-{audio_duration_sec/30:.0f} min on CPU)...")
+    start_time = time.time()
     # Pass midi_path=None so the library doesn't write the file itself --
     # we write it ourselves below, AFTER filtering, so the filtered notes
     # (and not the raw model output) are what ends up in the MIDI file and
     # everything downstream of it.
     result = transcriptor.transcribe(audio, None)
+    elapsed_sec = time.time() - start_time
     note_events = result["est_note_events"]
     pedal_events = result["est_pedal_events"]
+
+    print(f"✓ Transcription complete: {len(note_events)} notes detected in {elapsed_sec:.1f}s")
 
     if min_velocity > 0 or min_duration_sec > 0.0:
         before = len(note_events)
@@ -107,4 +115,6 @@ def transcribe_audio(
         print(f"  Filtered {dropped}/{before} notes below min_velocity={min_velocity}, "
               f"min_duration_sec={min_duration_sec} (likely ghost notes)")
 
+    print(f"  Writing {len(note_events)} notes to {out_midi_path}...")
     write_events_to_midi(start_time=0, note_events=note_events, pedal_events=pedal_events, midi_path=out_midi_path)
+    print(f"✓ MIDI written successfully")
