@@ -546,6 +546,31 @@ class FingeringGUI:
             ).pack(pady=(8, 0))
             Tooltip(btn, key=f"mode_{mode_key}", text=info["tooltip"], prefs=self.prefs)
 
+        # Visual image buttons
+        image_map = {
+            "hands": "buttons/pianist.png",
+            "render": "buttons/synthesia.png",
+            "midi_only": "buttons/video2mid.png",
+        }
+        image_row = ttk.Frame(page, style="Card.TFrame")
+        image_row.pack(pady=(16, 0))
+
+        self._page2_images = {}  # Store references so images don't get garbage collected
+        for mode_key in ("hands", "render", "midi_only"):
+            img_path = HERE / image_map[mode_key]
+            if img_path.exists():
+                try:
+                    img = tk.PhotoImage(file=str(img_path))
+                    self._page2_images[mode_key] = img
+                    img_btn = tk.Button(
+                        image_row, image=img, bg=COLOR_BG, bd=0, cursor="hand2",
+                        command=lambda m=mode_key: self._select_mode(m),
+                        activebackground=COLOR_ACC,
+                    )
+                    img_btn.pack(side="left", padx=8)
+                except Exception as e:
+                    print(f"Warning: couldn't load {img_path}: {e}", file=sys.stderr)
+
         ttk.Button(page, text="← Back", command=lambda: self._show_page(1)).pack(anchor="w", pady=(22, 0))
 
         return page
