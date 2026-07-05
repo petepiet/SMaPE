@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.mp4
+*.mov
+*.mkv
+*.webm
+/downloads/
+calibration*.json
+fingering.json
+*.fingering.json
+models/
+*.wav
+/log.txt
+/hand_colors_log.jsonl
+/.gui_prefs.json
+
+.venv/

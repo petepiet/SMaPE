@@ -1,0 +1,19 @@
+mediapipe
+opencv-python
+numpy
+mido
+yt-dlp
+librosa
+
+# Optional: enables real OS-level drag-and-drop for the MIDI (and video)
+# fields in gui.py. Not required -- gui.py falls back to a plain
+# Browse-button flow if this isn't installed. Install with:
+#   pip install tkinterdnd2
+# tkinterdnd2
+
+# Optional: only needed for --transcribe (audio -> MIDI transcription).
+# NOT installed by a plain `pip install -r requirements.txt` -- torch must be
+# installed FIRST with the CPU-only wheel (the default PyPI torch pulls a
+# multi-GB CUDA build), then this package on top. See README "Install
+# (transcription)" for the exact commands.
+# piano_transcription_inference
