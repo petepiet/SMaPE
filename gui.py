@@ -1457,8 +1457,18 @@ class FingeringGUI:
             user_flag = [] if os.access(prefix, os.W_OK) else ["--user"]
             pip = [self.python_exe, "-m", "pip", "install",
                    "--no-warn-script-location"] + user_flag
+            # Windows: install torch from regular PyPI -- the Windows wheels
+            # there are CPU-only anyway (the multi-GB CUDA builds only exist
+            # on download.pytorch.org), and download.pytorch.org's CloudFront
+            # TLS is broken by some AV/network filters (observed in the wild:
+            # SSLV3_ALERT_HANDSHAKE_FAILURE) while PyPI works fine.
+            # Linux: PyPI torch bundles CUDA, so the cpu index stays required.
+            if os.name == "nt":
+                torch_cmd = pip + ["torch"]
+            else:
+                torch_cmd = pip + ["torch", "--index-url", "https://download.pytorch.org/whl/cpu"]
             commands += [
-                pip + ["torch", "--index-url", "https://download.pytorch.org/whl/cpu"],
+                torch_cmd,
                 pip + ["piano_transcription_inference"],
             ]
         commands.append(argv)
