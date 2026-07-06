@@ -1,5 +1,5 @@
-"""Synthesia-style render support (see ai/tasks/006-synthesia-render-pipeline/
-PLAN.md): the video contributes exactly ONE thing -- which hand plays each
+"""Synthesia-style render support: the video contributes exactly ONE thing
+-- which hand plays each
 already-transcribed note, read from the lit key's colour. Audio (via
 --transcribe) remains the sole source of pitch/timing/pedal; this module
 never reads note onsets/offsets from pixels.
@@ -7,7 +7,7 @@ never reads note onsets/offsets from pixels.
 Split the same way as keyboard.py/keyboard_cv.py and hands.py/reconcile.py:
 pure numpy logic (clustering, lit detection, MIDI-duration trimming) is
 fully covered by selftest.py; cv2 video sampling is not (verified against
-real render footage instead -- see PLAN.md Phase R3).
+real render footage instead).
 """
 
 from __future__ import annotations
@@ -353,7 +353,7 @@ def trim_note_durations(notes: Sequence, lit_end_times: Sequence[Optional[float]
 
 # --------------------------------------------------------------------------
 # cv2 video sampling -- not covered by selftest.py, verified against real
-# render footage (see PLAN.md Phase R3)
+# render footage
 # --------------------------------------------------------------------------
 
 def _sample_patch(frame_bgr, x: float, y: float, radius: int = 3):

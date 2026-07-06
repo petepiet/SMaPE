@@ -49,7 +49,7 @@ so a **virtual environment is required** — a plain `pip install` fails with
 `error: externally-managed-environment`:
 
 ```bash
-cd tools/piano-fingering
+cd SMaPE
 python3 -m venv .venv          # if this fails: sudo apt install python3-venv
 source .venv/bin/activate      # prompt now shows (.venv)
 pip install -r requirements.txt
@@ -82,7 +82,7 @@ any current pip release works.
 
 The hand-landmark model file (`hand_landmarker.task`, ~10MB) is downloaded
 automatically the first time you run the tool (needs network access on
-that first run) and cached at `tools/piano-fingering/models/hand_landmarker.task`.
+that first run) and cached at `models/hand_landmarker.task`.
 If the automatic download fails (e.g. no network access on the analysis
 machine), download it manually from:
 
@@ -90,7 +90,7 @@ machine), download it manually from:
 https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
 ```
 
-and place it at `tools/piano-fingering/models/hand_landmarker.task`.
+and place it at `models/hand_landmarker.task` (relative to the repo root).
 
 ### Install (transcription, `--transcribe`, optional)
 

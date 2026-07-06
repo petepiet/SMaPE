@@ -1,5 +1,4 @@
-"""Per-source calibration persistence (Phase B of
-ai/tasks/005-cv-calibration-batch/PLAN.md): remembers a confirmed
+"""Per-source calibration persistence: remembers a confirmed
 `Calibration` keyed by camera setup ("this channel", "this local file") so
 a later video from the same setup can default to reusing it instead of
 re-detecting/re-clicking from scratch.

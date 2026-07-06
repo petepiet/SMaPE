@@ -4,7 +4,7 @@ that manual C/G-key clicking produces in ``keyboard.py``. Used to pre-seed
 ``interactive_calibrate`` with a working overlay so most videos need only an
 ESC to accept, with manual clicks always available to override/refine.
 
-Algorithm (see ai/tasks/005-cv-calibration-batch/PLAN.md Phase A):
+Algorithm:
   1. Find a horizontal scanline that passes through the black keys (cv2,
      not unit-tested -- mirrors hands.py's cv2 paths).
   2. Extract each black key's x-centroid on that scanline (cv2).

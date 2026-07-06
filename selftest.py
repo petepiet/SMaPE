@@ -808,14 +808,16 @@ def test_symple_bundle_round_trip():
         check(os.path.exists(out_path), "bundle file was not written")
         with zipfile.ZipFile(out_path) as zf:
             names = set(zf.namelist())
-            check(names == {"manifest.json", "song.mid", "fingering.json"},
+            check(names == {"manifest.json", "song.mid", "fingering.json",
+                            "DISCLAIMER.txt"},
                   f"unexpected bundle contents: {names}")
             check(zf.read("song.mid") == midi_bytes, "song.mid bytes did not round-trip")
             check(json.loads(zf.read("fingering.json")) == fingering_obj,
                   "fingering.json did not round-trip")
             manifest = json.loads(zf.read("manifest.json"))
             check(manifest["version"] == 1, "manifest version mismatch")
-            check(manifest["contents"] == ["song.mid", "fingering.json"],
+            check(manifest["contents"] == ["song.mid", "fingering.json",
+                                           "DISCLAIMER.txt"],
                   f"manifest contents list wrong: {manifest['contents']}")
             check(manifest["source"]["video"] == "https://example.com/v",
                   "manifest did not record source video")
