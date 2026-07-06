@@ -100,7 +100,9 @@ def _strip_fingering_json_suffix(path: str) -> str:
     for suffix in (".fingering.json", ".json"):
         if path.endswith(suffix):
             return path[: -len(suffix)]
-    return str(Path(path).with_suffix(""))
+    # os.path.splitext, not Path.with_suffix: round-tripping through Path
+    # rewrites the separators on Windows ("/a/b/x" -> "\\a\\b\\x").
+    return os.path.splitext(path)[0]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
