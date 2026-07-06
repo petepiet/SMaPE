@@ -9,8 +9,10 @@ Heavy (torch) dependency -- imported lazily inside `transcribe_audio` only,
 so the rest of the tool (and selftest.py, which must stay pure-numpy) never
 needs torch installed. See README "Install (transcription)" for the CPU-only
 torch install command and the one-time ~165MB checkpoint download (needs
-`wget` on PATH and network access on first use only -- it's cached under
-~/piano_transcription_inference_data/ after that).
+network access on first use only -- it's cached under
+~/piano_transcription_inference_data/ after that). The checkpoint is
+downloaded here with urllib (`_ensure_checkpoint`) rather than left to the
+library, whose own fallback shells out to `wget` -- absent on Windows.
 """
 from __future__ import annotations
 
@@ -38,6 +40,41 @@ def filter_note_events(note_events: list, min_velocity: int = 0, min_duration_se
         e for e in note_events
         if e["velocity"] >= min_velocity and (e["offset_time"] - e["onset_time"]) >= min_duration_sec
     ]
+
+
+def _ensure_checkpoint() -> None:
+    """Pre-downloads the Kong model checkpoint to the library's default path
+    if it isn't cached yet, so `PianoTranscription()` never hits its own
+    wget-based download (os.system('wget ...') -- fails on Windows and gives
+    no progress feedback). Same path and URL as the library's inference.py
+    uses, so a checkpoint cached by either side is seen by both."""
+    import os
+    import urllib.request
+
+    checkpoint_path = os.path.join(
+        os.path.expanduser("~"), "piano_transcription_inference_data",
+        "note_F1=0.9677_pedal_F1=0.9186.pth")
+    if os.path.exists(checkpoint_path) and os.path.getsize(checkpoint_path) > 1_000_000:
+        return
+    url = ("https://zenodo.org/record/4034264/files/"
+           "CRNN_note_F1%3D0.9677_pedal_F1%3D0.9186.pth?download=1")
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+    print("  Downloading transcription model checkpoint (~165MB, one-time)...", flush=True)
+
+    def _progress(blocks, block_size, total):
+        done = blocks * block_size
+        if total > 0 and blocks % 256 == 0:
+            print(f"    {done / 1e6:.0f}/{total / 1e6:.0f} MB", flush=True)
+
+    tmp_path = checkpoint_path + ".part"
+    try:
+        urllib.request.urlretrieve(url, tmp_path, reporthook=_progress)
+        os.replace(tmp_path, checkpoint_path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+    print("  ✓ Checkpoint downloaded", flush=True)
 
 
 def transcribe_audio(
@@ -101,7 +138,8 @@ def transcribe_audio(
     audio_duration_sec = len(audio) / sr
     print(f"  Audio loaded: {audio_duration_sec:.1f} seconds", flush=True)
 
-    print("  Loading transcription model (first run downloads a ~165MB checkpoint)...", flush=True)
+    _ensure_checkpoint()
+    print("  Loading transcription model...", flush=True)
     transcriptor = PianoTranscription(device="cpu")
     if onset_threshold is not None:
         transcriptor.onset_threshold = onset_threshold

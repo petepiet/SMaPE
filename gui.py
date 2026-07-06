@@ -60,9 +60,32 @@ except ImportError:
     _HAS_PIL = False
 
 
-HERE = Path(__file__).resolve().parent
+# Frozen (PyInstaller) Windows bundle layout: SMaPE.exe sits next to app/
+# (the engine scripts, run as plain files) and runtime/ (an embeddable
+# CPython that runs them), so the GUI keeps its subprocess model unchanged
+# -- and `runtime/python.exe -m pip` can install the optional transcription
+# stack on demand (see _ensure_transcription_deps).
+if getattr(sys, "frozen", False):
+    BUNDLE_DIR = Path(sys.executable).resolve().parent
+    HERE = BUNDLE_DIR / "app"
+else:
+    BUNDLE_DIR = Path(__file__).resolve().parent
+    HERE = BUNDLE_DIR
+RUNTIME_PYTHON = BUNDLE_DIR / "runtime" / ("python.exe" if os.name == "nt" else "bin/python3")
 EXTRACT_SCRIPT = HERE / "extract_fingering.py"
-VENV_PYTHON = HERE / ".venv" / "bin" / "python"
+VENV_PYTHON = HERE / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+# Bundled ffmpeg (used by librosa's audio loading and yt-dlp): prepend to
+# PATH so child processes find it without a system-wide install.
+_FFMPEG_DIR = BUNDLE_DIR / "ffmpeg"
+if _FFMPEG_DIR.is_dir():
+    os.environ["PATH"] = str(_FFMPEG_DIR) + os.pathsep + os.environ.get("PATH", "")
+
+# On Windows the GUI is a windowed (no-console) exe; without this flag every
+# child process would flash open its own console window.
+POPEN_KWARGS = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+)
 DOWNLOADS_DIR = os.path.expanduser("~/Downloads")
 APP_TITLE = "Symple Midi and Playstyle Extractor (SMaPE)"
 ICON_PATH = HERE.parent.parent / "src-tauri" / "icons" / "32x32.png"
@@ -181,7 +204,11 @@ class FingeringGUI:
 
     # -- interpreter selection -------------------------------------------------
     def _resolve_python(self):
-        if VENV_PYTHON.exists():
+        if RUNTIME_PYTHON.exists():
+            # Bundled runtime (Windows zip build) -- ships the lite deps.
+            self.python_exe = str(RUNTIME_PYTHON)
+            self.venv_warning = None
+        elif VENV_PYTHON.exists():
             self.python_exe = str(VENV_PYTHON)
             self.venv_warning = None
         else:
@@ -190,6 +217,24 @@ class FingeringGUI:
                 "No .venv found — install dependencies first: see README.md; "
                 "using system Python which likely lacks mediapipe/opencv"
             )
+
+    def _transcription_deps_present(self):
+        """True if the Python that will run the job can import the optional
+        transcription stack (torch + piano_transcription_inference).
+
+        Checked via find_spec in a subprocess (fast -- does not import torch)
+        rather than in-process: the GUI's interpreter is not the one that
+        runs the job (frozen bundle / .venv)."""
+        probe = ("import importlib.util as u, sys; "
+                 "sys.exit(0 if u.find_spec('torch') "
+                 "and u.find_spec('piano_transcription_inference') else 1)")
+        try:
+            return subprocess.run(
+                [self.python_exe, "-c", probe],
+                capture_output=True, timeout=30, **POPEN_KWARGS,
+            ).returncode == 0
+        except Exception:
+            return False
 
     # -- visual style, matching the main Symplethesia app ----------------------
     def _setup_style(self):
@@ -1387,28 +1432,57 @@ class FingeringGUI:
             return
 
         argv = self._build_argv()
+
+        # The transcription stack (CPU torch + the Kong model package) is not
+        # part of the lite bundle/venv -- offer a one-time in-place install
+        # into whatever Python will run the job.
+        commands = []
+        if "--transcribe" in argv and not self._transcription_deps_present():
+            import tkinter.messagebox as msgbox
+            if not msgbox.askyesno(
+                "Install transcription support?",
+                "Audio-to-MIDI transcription needs a one-time extra download "
+                "(~1 GB: CPU-only PyTorch + the piano transcription model "
+                "package).\n\nDownload and install it now into SMaPE's own "
+                "Python runtime? Nothing outside SMaPE is modified.",
+            ):
+                self._set_status("Transcription support not installed — run cancelled.", error=True)
+                return
+            commands += [
+                [self.python_exe, "-m", "pip", "install", "--no-warn-script-location",
+                 "torch", "--index-url", "https://download.pytorch.org/whl/cpu"],
+                [self.python_exe, "-m", "pip", "install", "--no-warn-script-location",
+                 "piano_transcription_inference"],
+            ]
+        commands.append(argv)
+
         self._clear_log()
-        self._log(f"$ {' '.join(argv)}\n\n")
         self._set_status("Running...", error=False)
         self.run_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
 
         def worker():
-            try:
-                self.proc = subprocess.Popen(
-                    argv,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-                assert self.proc.stdout is not None
-                for line in self.proc.stdout:
-                    self.log_queue.put(("line", line))
-                returncode = self.proc.wait()
-            except Exception as exc:
-                self.log_queue.put(("line", f"\n[GUI] Failed to launch subprocess: {exc}\n"))
-                returncode = -1
+            returncode = -1
+            for cmd in commands:
+                self.log_queue.put(("line", f"$ {' '.join(cmd)}\n\n"))
+                try:
+                    self.proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        **POPEN_KWARGS,
+                    )
+                    assert self.proc.stdout is not None
+                    for line in self.proc.stdout:
+                        self.log_queue.put(("line", line))
+                    returncode = self.proc.wait()
+                except Exception as exc:
+                    self.log_queue.put(("line", f"\n[GUI] Failed to launch subprocess: {exc}\n"))
+                    returncode = -1
+                if returncode != 0:
+                    break
             self.log_queue.put(("done", returncode))
 
         self.reader_thread = threading.Thread(target=worker, daemon=True)

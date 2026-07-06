@@ -41,6 +41,24 @@ blind audio/video transcription... unless you pass `--transcribe`, which
 generates the MIDI from the video's own audio using a piano-specific AMT
 (automatic music transcription) model. See ["Transcription"](#transcription---transcribe) below.
 
+## Windows: portable app (no install)
+
+Each push to `master` builds **SMaPE-windows-x64.zip** via GitHub Actions
+(tagged `v*` pushes also publish it as a GitHub Release). Download it,
+unzip anywhere, run `SMaPE.exe` — no Python, ffmpeg, or pip needed. The zip
+contains:
+
+- `SMaPE.exe` — the GUI
+- `app/` — the analysis engine (plain Python scripts)
+- `runtime/` — a private embedded Python with the core dependencies
+  (mediapipe, opencv, librosa, ...) preinstalled
+- `ffmpeg/` — static ffmpeg/ffprobe binaries
+
+The heavy transcription stack (CPU PyTorch + the Kong model package, ~1 GB)
+is **not** in the zip. The first time you run the *video2mid* (`--transcribe`)
+mode, the GUI offers to download and install it into the bundle's own
+`runtime/` — a one-time step that touches nothing outside the SMaPE folder.
+
 ## Install
 
 Full install (on the machine that will actually run the analysis over
@@ -111,9 +129,8 @@ pip install piano_transcription_inference
 ```
 
 The first `--transcribe` run downloads a **~165MB checkpoint** to
-`~/piano_transcription_inference_data/` (needs network access **and** the
-`wget` binary on PATH -- both one-time; the checkpoint is cached after
-that). CPU inference is fine: a few minutes of solo piano audio typically
+`~/piano_transcription_inference_data/` (needs network access -- one-time;
+the checkpoint is cached after that). CPU inference is fine: a few minutes of solo piano audio typically
 takes on the order of a minute or two on a modern CPU, no GPU required.
 
 ### Self-test only (no video libs needed)

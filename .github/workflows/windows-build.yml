@@ -1,0 +1,103 @@
+# Builds the self-contained Windows bundle: SMaPE-windows-x64.zip
+#
+# Layout of the zip (see gui.py's "frozen bundle layout" comment):
+#   SMaPE/
+#     SMaPE.exe        PyInstaller-frozen GUI (tkinter/PIL/tkinterdnd2 inside)
+#     _internal/       PyInstaller runtime for the exe
+#     app/             the engine scripts, run as plain files by runtime/
+#     runtime/         embeddable CPython + pip + the lite deps
+#     ffmpeg/          static ffmpeg/ffprobe (librosa audio load, yt-dlp)
+#
+# "Lite": torch / piano_transcription_inference are NOT bundled -- the GUI
+# offers a one-time `runtime\python -m pip install` (~1 GB) the first time
+# the user runs the video2mid (--transcribe) mode.
+#
+# Runs on every push to master and on tags; tags also publish a release.
+
+name: windows-build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  PYTHON_EMBED_URL: https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
+  FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip
+  HAND_MODEL_URL: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build SMaPE.exe (GUI) with PyInstaller
+        shell: pwsh
+        run: |
+          pip install pyinstaller pillow tkinterdnd2
+          # .ico for the exe, converted from the project logo
+          python -c "from PIL import Image; Image.open('smape.png').save('smape.ico', sizes=[(16,16),(32,32),(48,48),(256,256)])"
+          pyinstaller --noconfirm --windowed --name SMaPE --icon smape.ico gui.py
+
+      - name: Assemble bundle layout
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bundle | Out-Null
+          Copy-Item -Recurse dist\SMaPE\* bundle\
+          New-Item -ItemType Directory -Force bundle\app | Out-Null
+          Copy-Item *.py, smape.png, DISCLAIMER.txt, requirements.txt bundle\app\
+          Copy-Item -Recurse buttons bundle\app\buttons
+          # Pre-bundle the hand-landmark model so first run works offline
+          New-Item -ItemType Directory -Force bundle\app\models | Out-Null
+          Invoke-WebRequest $env:HAND_MODEL_URL -OutFile bundle\app\models\hand_landmarker.task
+
+      - name: Build embedded Python runtime with lite deps
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:PYTHON_EMBED_URL -OutFile embed.zip
+          Expand-Archive embed.zip -DestinationPath bundle\runtime
+          # Enable site-packages (off by default in the embeddable distro),
+          # required for pip and for importing what pip installs
+          $pth = Get-ChildItem bundle\runtime\python3*._pth | Select-Object -First 1
+          (Get-Content $pth.FullName) -replace '#import site', 'import site' | Set-Content $pth.FullName
+          Invoke-WebRequest https://bootstrap.pypa.io/get-pip.py -OutFile get-pip.py
+          bundle\runtime\python.exe get-pip.py --no-warn-script-location
+          bundle\runtime\python.exe -m pip install --no-warn-script-location -r requirements.txt
+
+      - name: Bundle static ffmpeg
+        shell: pwsh
+        run: |
+          Invoke-WebRequest $env:FFMPEG_URL -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          New-Item -ItemType Directory -Force bundle\ffmpeg | Out-Null
+          Copy-Item ffmpeg-tmp\*\bin\ffmpeg.exe, ffmpeg-tmp\*\bin\ffprobe.exe bundle\ffmpeg\
+
+      - name: Smoke-test the runtime
+        shell: pwsh
+        run: |
+          bundle\runtime\python.exe -c "import mediapipe, cv2, numpy, mido, librosa, yt_dlp; print('lite deps import OK')"
+          bundle\runtime\python.exe bundle\app\selftest.py
+
+      - name: Zip bundle
+        shell: pwsh
+        run: |
+          Rename-Item bundle SMaPE
+          Compress-Archive -Path SMaPE -DestinationPath SMaPE-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SMaPE-windows-x64
+          path: SMaPE-windows-x64.zip
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create $env:GITHUB_REF_NAME SMaPE-windows-x64.zip --title $env:GITHUB_REF_NAME --generate-notes
