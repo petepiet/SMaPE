@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://petepiet.github.io/SMaPE/sitemap.xml
