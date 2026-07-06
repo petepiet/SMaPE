@@ -1448,11 +1448,18 @@ class FingeringGUI:
             ):
                 self._set_status("Transcription support not installed — run cancelled.", error=True)
                 return
+            # A system-installed bundle (e.g. the .deb's /opt/smape) is not
+            # user-writable -- install into the user site-packages instead,
+            # which the runtime interpreter picks up automatically.
+            prefix = Path(self.python_exe).resolve().parent
+            if prefix.name in ("bin", "Scripts"):
+                prefix = prefix.parent
+            user_flag = [] if os.access(prefix, os.W_OK) else ["--user"]
+            pip = [self.python_exe, "-m", "pip", "install",
+                   "--no-warn-script-location"] + user_flag
             commands += [
-                [self.python_exe, "-m", "pip", "install", "--no-warn-script-location",
-                 "torch", "--index-url", "https://download.pytorch.org/whl/cpu"],
-                [self.python_exe, "-m", "pip", "install", "--no-warn-script-location",
-                 "piano_transcription_inference"],
+                pip + ["torch", "--index-url", "https://download.pytorch.org/whl/cpu"],
+                pip + ["piano_transcription_inference"],
             ]
         commands.append(argv)
 

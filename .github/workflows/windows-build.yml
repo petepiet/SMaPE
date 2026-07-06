@@ -22,6 +22,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: write  # gh release create
+
 env:
   PYTHON_EMBED_URL: https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
   FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip
@@ -101,3 +104,91 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: gh release create $env:GITHUB_REF_NAME SMaPE-windows-x64.zip --title $env:GITHUB_REF_NAME --generate-notes
+
+  # Debian/Ubuntu bundle, same layout as Windows: frozen GUI + app/ +
+  # relocatable CPython runtime (python-build-standalone), installed to
+  # /opt/smape with a /usr/bin/smape symlink and a desktop entry. ffmpeg is
+  # a package dependency instead of being bundled.
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build SMaPE (GUI) with PyInstaller
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-tk
+          pip install pyinstaller pillow tkinterdnd2
+          pyinstaller --noconfirm --windowed --name SMaPE gui.py
+
+      - name: Assemble /opt/smape tree
+        run: |
+          mkdir -p pkg/opt/smape/app/models
+          cp -r dist/SMaPE/. pkg/opt/smape/
+          cp *.py smape.png DISCLAIMER.txt requirements.txt pkg/opt/smape/app/
+          cp -r buttons pkg/opt/smape/app/buttons
+          curl -fsSL -o pkg/opt/smape/app/models/hand_landmarker.task "$HAND_MODEL_URL"
+
+      - name: Bundle relocatable Python runtime with lite deps
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url=$(gh api repos/astral-sh/python-build-standalone/releases/latest \
+            --jq '.assets[] | select(.name | test("cpython-3\\.12\\.[0-9]+\\+[0-9]+-x86_64-unknown-linux-gnu-install_only\\.tar\\.gz$")) | .browser_download_url' | head -1)
+          echo "runtime: $url"
+          curl -fsSL -o pbs.tar.gz "$url"
+          tar -xzf pbs.tar.gz
+          mv python pkg/opt/smape/runtime
+          pkg/opt/smape/runtime/bin/python3 -m pip install --no-warn-script-location -r requirements.txt
+
+      - name: Smoke-test the runtime
+        run: |
+          pkg/opt/smape/runtime/bin/python3 -c "import mediapipe, cv2, numpy, mido, librosa, yt_dlp; print('lite deps import OK')"
+          pkg/opt/smape/runtime/bin/python3 pkg/opt/smape/app/selftest.py
+
+      - name: Build .deb
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "$VERSION" in master|*[!0-9.]*) VERSION="0.0.0+dev.$(git rev-parse --short HEAD)";; esac
+          mkdir -p pkg/DEBIAN pkg/usr/bin pkg/usr/share/applications pkg/usr/share/pixmaps
+          cat > pkg/DEBIAN/control <<EOF
+          Package: smape
+          Version: $VERSION
+          Section: sound
+          Priority: optional
+          Architecture: amd64
+          Depends: ffmpeg
+          Maintainer: petepiet <noreply@github.com>
+          Description: Symple Midi and Playstyle Extractor
+           Detects piano finger positions from performance videos: which hand
+           and finger played each MIDI note. Exports .symple bundles for
+           Symplethesia.
+          EOF
+          ln -s /opt/smape/SMaPE pkg/usr/bin/smape
+          cp smape.png pkg/usr/share/pixmaps/smape.png
+          cat > pkg/usr/share/applications/smape.desktop <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=SMaPE
+          Comment=Extract piano fingering from videos
+          Exec=/opt/smape/SMaPE
+          Icon=/usr/share/pixmaps/smape.png
+          Terminal=false
+          Categories=AudioVideo;Audio;
+          EOF
+          dpkg-deb --build --root-owner-group pkg SMaPE-linux-amd64.deb
+          dpkg-deb --info SMaPE-linux-amd64.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SMaPE-linux-amd64
+          path: SMaPE-linux-amd64.deb
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" SMaPE-linux-amd64.deb --clobber
