@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
   <url>
     <loc>https://petepiet.github.io/SMaPE/</loc>
     <lastmod>2026-07-06</lastmod>
-    <changefreq>monthly</changefreq>
+    <changefreq>weekly</changefreq>
     <priority>1.0</priority>
+    <image:image>
+      <image:loc>https://petepiet.github.io/SMaPE/smape.png</image:loc>
+      <image:title>SMaPE — Symple Midi and Playstyle Extractor</image:title>
+      <image:caption>Detect piano finger positions from performance videos and export MIDI with fingering data</image:caption>
+    </image:image>
   </url>
 </urlset>
