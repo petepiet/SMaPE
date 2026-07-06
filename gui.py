@@ -81,6 +81,14 @@ _FFMPEG_DIR = BUNDLE_DIR / "ffmpeg"
 if _FFMPEG_DIR.is_dir():
     os.environ["PATH"] = str(_FFMPEG_DIR) + os.pathsep + os.environ.get("PATH", "")
 
+# Without this, a child process's stdout isn't a real console (piped, and on
+# Windows the GUI itself is a no-console exe), so Python falls back to the
+# legacy ANSI codepage (cp1252) for sys.stdout -- which can't encode the
+# unicode symbols (e.g. checkmarks) some scripts print, raising
+# UnicodeEncodeError. Force UTF-8 for every subprocess we launch below.
+os.environ["PYTHONIOENCODING"] = "utf-8"
+os.environ["PYTHONUTF8"] = "1"
+
 # On Windows the GUI is a windowed (no-console) exe; without this flag every
 # child process would flash open its own console window.
 POPEN_KWARGS = (
@@ -356,6 +364,12 @@ class FingeringGUI:
         self.onset_threshold_var = tk.StringVar(value="")
         self.min_velocity_var = tk.StringVar(value="0")
         self.min_duration_var = tk.StringVar(value="0")
+        self.no_gpu_var = tk.BooleanVar(value=False)
+        # Windows only: plain PyPI torch is CPU-only there (Linux's PyPI
+        # wheel already bundles CUDA -- see the install-command comment in
+        # _on_run), so getting GPU accel on Windows needs an extra opt-in
+        # download of the CUDA build.
+        self.gpu_torch_var = tk.BooleanVar(value=False)
         self.artist_var = tk.StringVar(value="")
         self.title_var = tk.StringVar(value="")
         self.genre_var = tk.StringVar(value="")
@@ -1116,6 +1130,37 @@ class FingeringGUI:
             row=3, column=1, sticky="w", padx=(7, 0), pady=(0, 6)
         )
 
+        no_gpu_check = ttk.Checkbutton(
+            self.transcribe_opts_frame, text="Force CPU (disable GPU acceleration)",
+            variable=self.no_gpu_var,
+        )
+        no_gpu_check.grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        Tooltip(
+            no_gpu_check, key="no_gpu",
+            text="By default transcription uses a CUDA GPU automatically if one is available -- this "
+            "forces CPU-only inference instead. Only useful for troubleshooting a suspected GPU-specific "
+            "issue; leave unchecked to get the (usually much faster) GPU path when you have one.",
+            prefs=self.prefs,
+        )
+
+        if os.name == "nt":
+            gpu_torch_check = ttk.Checkbutton(
+                self.transcribe_opts_frame,
+                text="Use NVIDIA GPU (installs CUDA PyTorch, ~2.5 GB extra download)",
+                variable=self.gpu_torch_var,
+            )
+            gpu_torch_check.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 6))
+            Tooltip(
+                gpu_torch_check, key="gpu_torch_windows",
+                text="Only relevant the first time transcription support installs itself. Plain PyPI "
+                "PyTorch on Windows is CPU-only, so GPU acceleration needs a separate ~2.5 GB CUDA build "
+                "from download.pytorch.org. If that download fails with a TLS/handshake error (a known "
+                "issue with some AV/network setups against that host), the installer automatically falls "
+                "back to the CPU-only build and prints manual download instructions in the log, so the "
+                "run is never left broken -- you can retry the GPU install later.",
+                prefs=self.prefs,
+            )
+
     # -- browse / drop handlers ---------------------------------------------
     def _browse_video(self):
         path = filedialog.askopenfilename(title="Select video file", initialdir=DOWNLOADS_DIR)
@@ -1383,6 +1428,8 @@ class FingeringGUI:
             min_duration = self.min_duration_var.get().strip()
             if min_duration and float(min_duration) != 0.0:
                 argv += ["--min-duration", min_duration]
+            if self.no_gpu_var.get():
+                argv.append("--no-gpu")
         else:
             argv += ["--midi", self.midi_var.get().strip()]
 
@@ -1439,10 +1486,12 @@ class FingeringGUI:
         commands = []
         if "--transcribe" in argv and not self._transcription_deps_present():
             import tkinter.messagebox as msgbox
+            gpu_requested = os.name == "nt" and self.gpu_torch_var.get()
+            size_note = "~2.5 GB: CUDA-enabled PyTorch" if gpu_requested else "~1 GB: CPU-only PyTorch"
             if not msgbox.askyesno(
                 "Install transcription support?",
-                "Audio-to-MIDI transcription needs a one-time extra download "
-                "(~1 GB: CPU-only PyTorch + the piano transcription model "
+                f"Audio-to-MIDI transcription needs a one-time extra download "
+                f"({size_note} + the piano transcription model "
                 "package).\n\nDownload and install it now into SMaPE's own "
                 "Python runtime? Nothing outside SMaPE is modified.",
             ):
@@ -1457,20 +1506,38 @@ class FingeringGUI:
             user_flag = [] if os.access(prefix, os.W_OK) else ["--user"]
             pip = [self.python_exe, "-m", "pip", "install",
                    "--no-warn-script-location"] + user_flag
-            # Windows: install torch from regular PyPI -- the Windows wheels
-            # there are CPU-only anyway (the multi-GB CUDA builds only exist
-            # on download.pytorch.org), and download.pytorch.org's CloudFront
-            # TLS is broken by some AV/network filters (observed in the wild:
-            # SSLV3_ALERT_HANDSHAKE_FAILURE) while PyPI works fine.
-            # Linux: PyPI torch bundles CUDA, so the cpu index stays required.
+            # Windows: plain PyPI torch there is CPU-only (the CUDA builds
+            # only exist on download.pytorch.org). Linux: PyPI torch already
+            # bundles CUDA, so no separate GPU install step is ever needed
+            # there -- the cpu index stays the default to avoid the
+            # multi-GB CUDA build when the user hasn't asked for it.
             if os.name == "nt":
-                torch_cmd = pip + ["torch"]
+                cpu_torch_cmd = pip + ["torch"]
             else:
-                torch_cmd = pip + ["torch", "--index-url", "https://download.pytorch.org/whl/cpu"]
-            commands += [
-                torch_cmd,
-                pip + ["piano_transcription_inference"],
-            ]
+                cpu_torch_cmd = pip + ["torch", "--index-url", "https://download.pytorch.org/whl/cpu"]
+            if os.name == "nt" and self.gpu_torch_var.get():
+                # download.pytorch.org's CloudFront TLS is broken by some
+                # AV/network filters (observed in the wild:
+                # SSLV3_ALERT_HANDSHAKE_FAILURE) even with AV/VPN disabled --
+                # most likely the bundled runtime's own OpenSSL build failing
+                # to negotiate with CloudFront, not a network block. If the
+                # automated install fails, fall back to the CPU-only build
+                # (so the run isn't left broken) and print manual steps.
+                cuda_torch_cmd = pip + ["torch", "--index-url", "https://download.pytorch.org/whl/cu121"]
+                fallback_msg = (
+                    "\n[GUI] CUDA PyTorch download failed (commonly a TLS/handshake issue "
+                    "against download.pytorch.org, not necessarily your network) -- falling "
+                    "back to the CPU-only build so this run can continue.\n"
+                    "[GUI] To get GPU acceleration manually instead: download the matching "
+                    "wheel via a browser (often succeeds where this automated download "
+                    "didn't) from https://download.pytorch.org/whl/cu121/ , then run:\n"
+                    f'[GUI]   "{self.python_exe}" -m pip install --no-warn-script-location '
+                    "<path-to-downloaded-torch-whl>\n\n"
+                )
+                commands.append(("try_then_fallback", cuda_torch_cmd, cpu_torch_cmd, fallback_msg))
+            else:
+                commands.append(cpu_torch_cmd)
+            commands.append(pip + ["piano_transcription_inference"])
         commands.append(argv)
 
         self._clear_log()
@@ -1478,26 +1545,36 @@ class FingeringGUI:
         self.run_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
 
+        def run_one(cmd):
+            self.log_queue.put(("line", f"$ {' '.join(cmd)}\n\n"))
+            try:
+                self.proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    **POPEN_KWARGS,
+                )
+                assert self.proc.stdout is not None
+                for line in self.proc.stdout:
+                    self.log_queue.put(("line", line))
+                return self.proc.wait()
+            except Exception as exc:
+                self.log_queue.put(("line", f"\n[GUI] Failed to launch subprocess: {exc}\n"))
+                return -1
+
         def worker():
             returncode = -1
             for cmd in commands:
-                self.log_queue.put(("line", f"$ {' '.join(cmd)}\n\n"))
-                try:
-                    self.proc = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                        **POPEN_KWARGS,
-                    )
-                    assert self.proc.stdout is not None
-                    for line in self.proc.stdout:
-                        self.log_queue.put(("line", line))
-                    returncode = self.proc.wait()
-                except Exception as exc:
-                    self.log_queue.put(("line", f"\n[GUI] Failed to launch subprocess: {exc}\n"))
-                    returncode = -1
+                if isinstance(cmd, tuple) and cmd[0] == "try_then_fallback":
+                    _, primary, fallback, fallback_msg = cmd
+                    returncode = run_one(primary)
+                    if returncode != 0:
+                        self.log_queue.put(("line", fallback_msg))
+                        returncode = run_one(fallback)
+                else:
+                    returncode = run_one(cmd)
                 if returncode != 0:
                     break
             self.log_queue.put(("done", returncode))

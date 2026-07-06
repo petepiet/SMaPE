@@ -36,8 +36,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Without this, prints from third-party libraries (like Kong's per-segment
 # "Segment X / Y" transcription progress) sit invisible in Python's block
 # buffer for the entire run, making long phases look hung.
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
+#
+# encoding="utf-8" guards against UnicodeEncodeError on Windows: a piped
+# stdout (GUI subprocess) or a legacy-codepage console both otherwise default
+# to cp1252, which can't encode the unicode symbols (checkmarks, etc.)
+# printed below.
+sys.stdout.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
 
 # Silence noisy-but-harmless native-library logging that looks alarming but
 # reflects nothing actually wrong (the pipeline works fine underneath it).
@@ -145,6 +150,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="--transcribe only: drop transcribed notes shorter than this (seconds) -- tracking blips tend "
         "to be very short. Default 0.0 = no filtering.",
+    )
+    p.add_argument(
+        "--no-gpu",
+        action="store_true",
+        default=False,
+        help="--transcribe only: force CPU inference even if a CUDA-capable GPU + PyTorch build are "
+        "available. By default the GPU is used automatically when present; this is a troubleshooting "
+        "escape hatch (e.g. suspected GPU-specific bug).",
     )
     p.add_argument(
         "--no-reconcile",
@@ -1122,6 +1135,7 @@ def analyze(args: argparse.Namespace) -> dict:
                 onset_threshold=args.onset_threshold,
                 min_velocity=args.min_velocity,
                 min_duration_sec=args.min_duration,
+                device="cpu" if args.no_gpu else None,
             )
         finally:
             try:

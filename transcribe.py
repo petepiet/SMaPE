@@ -83,6 +83,7 @@ def transcribe_audio(
     onset_threshold: float | None = None,
     min_velocity: int = 0,
     min_duration_sec: float = 0.0,
+    device: str | None = None,
 ) -> None:
     """Transcribes a solo-piano audio file (anything librosa can load: wav,
     mp3, ...) to MIDI, writing the result to `out_midi_path`.
@@ -97,8 +98,11 @@ def transcribe_audio(
     embedded CC64 pedal data is preserved if the file is later imported into
     Symplethesia (see the app's pedal-import support).
 
-    CPU-only inference (no GPU required) -- a few minutes of solo piano
-    typically takes on the order of a minute or two on a modern CPU.
+    Runs on GPU automatically if a CUDA-capable PyTorch + GPU are available
+    (pass device="cpu" to force CPU regardless -- see --no-gpu in
+    extract_fingering.py); otherwise CPU inference is fine -- a few minutes
+    of solo piano typically takes on the order of a minute or two on a
+    modern CPU.
 
     Ghost-note controls (all optional, all no-ops at their defaults so
     behavior is unchanged unless you opt in -- see README "Reducing ghost
@@ -123,15 +127,22 @@ def transcribe_audio(
     from piano_transcription_inference.utilities import write_events_to_midi
     import time
 
-    # Kong's model is GRU-heavy, and GRUs on CPU are hurt (not helped) by
-    # many threads: on hybrid P/E-core CPUs (e.g. i5-1235U) PyTorch's default
-    # of one thread per logical core makes every parallel section wait for
-    # the slowest E-core at each sync point. Empirically observed making a
-    # ~4-min job take hours. Cap at 4 threads unless the user overrides via
-    # TORCH_NUM_THREADS.
-    num_threads = int(os.environ.get("TORCH_NUM_THREADS", "0")) or min(4, os.cpu_count() or 4)
-    torch.set_num_threads(num_threads)
-    print(f"  Using {num_threads} CPU threads for inference (override with TORCH_NUM_THREADS)", flush=True)
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if device == "cpu":
+        # Kong's model is GRU-heavy, and GRUs on CPU are hurt (not helped) by
+        # many threads: on hybrid P/E-core CPUs (e.g. i5-1235U) PyTorch's
+        # default of one thread per logical core makes every parallel
+        # section wait for the slowest E-core at each sync point.
+        # Empirically observed making a ~4-min job take hours. Cap at 4
+        # threads unless the user overrides via TORCH_NUM_THREADS.
+        num_threads = int(os.environ.get("TORCH_NUM_THREADS", "0")) or min(4, os.cpu_count() or 4)
+        torch.set_num_threads(num_threads)
+        print(f"  Using {num_threads} CPU threads for inference (override with TORCH_NUM_THREADS)", flush=True)
+    else:
+        gpu_name = torch.cuda.get_device_name(0)
+        print(f"  Using GPU for inference: {gpu_name}", flush=True)
 
     print("  Loading audio...", flush=True)
     audio, sr = librosa.load(audio_path, sr=sample_rate, mono=True)
@@ -140,7 +151,7 @@ def transcribe_audio(
 
     _ensure_checkpoint()
     print("  Loading transcription model...", flush=True)
-    transcriptor = PianoTranscription(device="cpu")
+    transcriptor = PianoTranscription(device=device)
     if onset_threshold is not None:
         transcriptor.onset_threshold = onset_threshold
         print(f"  Using onset_threshold={onset_threshold} (library default is {DEFAULT_ONSET_THRESHOLD})", flush=True)
