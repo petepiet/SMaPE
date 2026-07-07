@@ -422,16 +422,32 @@ assignment).
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "source": "<video path or url>",
   "midi": "<midi path>",
   "ppq": 480,
   "offsetSec": 0.0,
   "notes": [
-    { "onsetTick": 0, "pitch": 60, "hand": "L", "finger": 1, "confidence": 0.87 }
+    {
+      "onsetTick": 0,
+      "pitch": 60,
+      "hand": "L",
+      "finger": 1,
+      "confidence": 0.87,
+      "startSec": 0.0,
+      "correctedEndSec": 0.485,
+      "soundEndSec": 1.9,
+      "keyDurationSec": 0.485,
+      "soundDurationSec": 1.9,
+      "releaseReason": "same_finger_new_note"
+    }
   ]
 }
 ```
+
+(This is the hand-tracking path's per-note shape; `--render` mode still uses
+a separate `durationSec`-based shape -- see "Note release correction" below
+for why the two differ.)
 
 - `onsetTick` -- tick position of the note-on, in the MIDI's own `ppq`
   (matches Symplethesia's tick units when `ppq` agrees; the importer joins
@@ -440,6 +456,52 @@ assignment).
 - `hand` -- `"L"` or `"R"`.
 - `finger` -- `1`-`5` (1 = thumb, 5 = pinky).
 - `confidence` -- `0.0`-`1.0`, derived from fingertip-to-key pixel distance.
+- `flags` -- optional list of reconciliation flags (e.g.
+  `"no-finger-support"`); present only when non-empty.
+- `startSec` -- the note's onset, in the MIDI/note timeline (`note.start_sec`).
+- `correctedEndSec` -- the estimated PHYSICAL key-release time (when the
+  finger actually left the key), in the same timeline.
+- `soundEndSec` -- the original, unmodified audio note-off (`startSec +`
+  the MIDI/AMT duration) -- when sustain pedal is down this is later than
+  the key was actually released, and that's intentional: it's a correct
+  description of the *sound*, not the key.
+- `keyDurationSec` / `soundDurationSec` -- `correctedEndSec`/`soundEndSec`
+  minus `startSec`, provided pre-computed for convenience.
+- `releaseReason` -- which rule produced `correctedEndSec`; see below.
+
+### Note release correction
+
+Audio transcription reports when a note stops being *audible*, not when the
+key was physically released -- sustain pedal (or room resonance) can make a
+short staccato note look like it lasted a second or more. This tool
+therefore tracks **two distinct durations** per note:
+
+- **sound duration** (`soundDurationSec`) -- unchanged from the audio/MIDI
+  transcription; this is what should drive audio-accuracy comparisons.
+- **key duration** (`keyDurationSec`) -- a corrected, always-<=-sound-duration
+  estimate of how long the finger actually held the key down; this is what
+  should drive on-screen key-release animation/visuals.
+
+`correctedEndSec` is chosen as the **smallest** of several candidate caps
+(ties broken toward the higher-priority rule):
+
+1. **same-finger rule** -- a real hand can't still be holding this key down
+   once the SAME (hand, finger) is already pressing its next note, so that
+   next note's onset (minus a small safety margin, `--release-margin-ms`,
+   default 15ms) caps this note's release.
+2. **same-pitch rule** -- likewise, a key must come back up before it can be
+   struck again, so the next note at the same pitch (restrike) caps it too.
+3. **visual key-release** -- if the video's own hand tracking observed the
+   finger leaving the key before the audio-reported offset (the existing
+   sustain-pedal de-pedal check in `reconcile.py`), that trusted observation
+   caps it.
+4. **original MIDI/audio offset** -- if nothing above applies, the original
+   sound end is used (key duration == sound duration).
+5. **fallback estimate** -- only when no MIDI duration exists at all
+   (start + 0.3s).
+
+Sustain pedal never enters this computation directly -- it only ever
+lengthens `soundDurationSec`, never `keyDurationSec`.
 
 ## Output bundle (`.symple`)
 

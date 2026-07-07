@@ -215,6 +215,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--confidence-threshold", type=float, default=0.0, help="Drop matches below this confidence (default 0.0 = keep all)")
     p.add_argument(
+        "--release-margin-ms",
+        type=float,
+        default=15.0,
+        help="Note release correction: safety margin (milliseconds) subtracted when capping a note's "
+        "corrected (physical key-release) end time at the next note's onset, for the same-finger and "
+        "same-pitch geometric guards -- a real hand must release the key strictly BEFORE that next onset, "
+        "not merely by the time it arrives. Default 15ms.",
+    )
+    p.add_argument(
         "--sync-method",
         choices=["audio", "press-moments"],
         default="audio",
@@ -930,6 +939,7 @@ def analyze(args: argparse.Namespace) -> dict:
         reconcile_note, confidence_by_window, _frame_times,
         analyze_hand_spread, HAND_SPREAD_WARN_THRESHOLD_KEYS, CLOSE_HANDS_THRESHOLD_KEYS,
     )
+    from note_release import compute_corrected_ends, ReleaseInput
     if args.render:
         from render_hands import (
             assign_hands_for_notes, assign_hands_from_reference_colors,
@@ -1383,9 +1393,10 @@ def analyze(args: argparse.Namespace) -> dict:
         out_notes = []
         confidences = []
         notes_with_time = []  # (start_sec, confidence) for the per-window table
+        release_inputs = []  # parallel to out_notes -- fed to compute_corrected_ends below
         dropped_count = 0
         flagged_count = 0
-        depedaled_count = 0
+        visual_release_count = 0
 
         for idx, note in enumerate(midi_data.notes):
             m = results.get(idx)
@@ -1402,6 +1413,7 @@ def analyze(args: argparse.Namespace) -> dict:
                 "confidence": round(m.confidence, 4),
             }
 
+            visual_release_sec = None
             if not args.no_reconcile:
                 video_onset_sec = note.start_sec + offset_sec
                 rec = reconcile_note(
@@ -1423,19 +1435,42 @@ def analyze(args: argparse.Namespace) -> dict:
                     if "no-finger-support" in rec.flags:
                         flagged_count += 1
                     if "depedaled" in rec.flags:
-                        depedaled_count += 1
-                        # Seconds, not ticks: the reconciliation math above is
-                        # entirely in seconds (video/audio time), and nothing
-                        # downstream currently consumes a tick-based duration --
-                        # keeping these in seconds avoids an unused tick
-                        # conversion (see midi_io.py for the tick<->sec map if
-                        # a future consumer needs it).
-                        note_entry["durationSec"] = round(rec.trimmed_duration_sec, 4)
-                        note_entry["audioDurationSec"] = round(rec.audio_duration_sec, 4)
+                        # rec.trimmed_duration_sec is in VIDEO time (relative
+                        # to video_onset_sec); note_release.py works entirely
+                        # in the MIDI/note timeline (note.start_sec), so
+                        # translate it into a visual release time in THAT
+                        # timeline here -- reusing reconcile's own safety
+                        # gates (occlusion, min lead, min trimmed duration)
+                        # as the trust boundary for this visual evidence.
+                        visual_release_sec = note.start_sec + rec.trimmed_duration_sec
 
             out_notes.append(note_entry)
             confidences.append(m.confidence)
             notes_with_time.append((note.start_sec, m.confidence))
+            release_inputs.append(
+                ReleaseInput(
+                    start_sec=note.start_sec,
+                    original_end_sec=note.start_sec + note.duration_sec,
+                    hand=m.hand,
+                    finger=m.finger,
+                    pitch=note.pitch,
+                    visual_release_sec=visual_release_sec,
+                )
+            )
+
+        release_results = compute_corrected_ends(
+            release_inputs, margin_sec=args.release_margin_ms / 1000.0
+        )
+        for note_entry, rel_in, rel_out in zip(out_notes, release_inputs, release_results):
+            sound_end = rel_in.original_end_sec
+            note_entry["startSec"] = round(rel_in.start_sec, 4)
+            note_entry["correctedEndSec"] = round(rel_out.corrected_end_sec, 4)
+            note_entry["soundEndSec"] = round(sound_end, 4)
+            note_entry["keyDurationSec"] = round(rel_out.corrected_end_sec - rel_in.start_sec, 4)
+            note_entry["soundDurationSec"] = round(sound_end - rel_in.start_sec, 4)
+            note_entry["releaseReason"] = rel_out.reason
+            if rel_out.reason == "visual_key_release":
+                visual_release_count += 1
 
     out = {
         "version": 2,
@@ -1456,7 +1491,7 @@ def analyze(args: argparse.Namespace) -> dict:
     print(f"  offset used: {offset_sec:.3f}s")
     if not args.no_reconcile:
         print(f"  reconciliation: {dropped_count} dropped, {flagged_count} flagged (no-finger-support), "
-              f"{depedaled_count} de-pedal trimmed")
+              f"{visual_release_count} key release corrected from visual tracking")
 
     # Per-10s-window mean confidence: a declining trend over a long song is
     # the signature of video/MIDI sync DRIFT (a single constant offset can't

@@ -65,6 +65,11 @@ from reconcile import (
     is_occluded, finger_leave_time, reconcile_note, confidence_by_window, _frame_times,
     analyze_hand_spread, CLOSE_HANDS_THRESHOLD_KEYS,
 )
+from note_release import (
+    compute_corrected_ends, ReleaseInput,
+    REASON_SAME_FINGER, REASON_SAME_PITCH, REASON_VISUAL, REASON_FINGER_LEFT,
+    REASON_ORIGINAL, REASON_FALLBACK,
+)
 from match import (
     Candidate,
     NoteToMatch,
@@ -1280,6 +1285,91 @@ def test_calibration_backward_compat_single_row():
     check(pt is not None, "pitch_to_screen should work in single-row mode")
 
 
+def test_release_same_finger_new_note():
+    inputs = [
+        ReleaseInput(start_sec=0.0, original_end_sec=3.0, hand="R", finger=2, pitch=60),
+        ReleaseInput(start_sec=1.0, original_end_sec=3.0, hand="R", finger=2, pitch=62),
+    ]
+    results = compute_corrected_ends(inputs)
+    check(approx(results[0].corrected_end_sec, 1.0 - 0.015), f"first note should be capped just before the next same-finger onset, got {results[0].corrected_end_sec}")
+    check(results[0].reason == REASON_SAME_FINGER, f"expected same_finger_new_note, got {results[0].reason}")
+    check(approx(results[1].corrected_end_sec, 3.0), "second note has no follower, should keep its original end")
+    check(results[1].reason == REASON_ORIGINAL, f"expected original_midi_offset, got {results[1].reason}")
+
+
+def test_release_sustain_pedal_key_shorter_than_sound():
+    inputs = [
+        ReleaseInput(start_sec=0.0, original_end_sec=2.5, hand="R", finger=1, pitch=60, visual_release_sec=0.6),
+    ]
+    results = compute_corrected_ends(inputs)
+    check(approx(results[0].corrected_end_sec, 0.6), f"expected visual release at 0.6, got {results[0].corrected_end_sec}")
+    check(results[0].reason == REASON_VISUAL, f"expected visual_key_release, got {results[0].reason}")
+    key_duration = results[0].corrected_end_sec - inputs[0].start_sec
+    sound_duration = inputs[0].original_end_sec - inputs[0].start_sec
+    check(key_duration < sound_duration, "key duration should be shorter than the pedal-inflated sound duration")
+    check(approx(sound_duration, 2.5), "sound end must stay at the original (pedal-inflated) offset")
+
+
+def test_release_same_pitch_restrike():
+    inputs = [
+        ReleaseInput(start_sec=0.0, original_end_sec=2.0, hand="R", finger=1, pitch=60),
+        ReleaseInput(start_sec=0.5, original_end_sec=2.0, hand="L", finger=3, pitch=60),
+    ]
+    results = compute_corrected_ends(inputs)
+    check(approx(results[0].corrected_end_sec, 0.5 - 0.015), f"expected cap just before the restrike, got {results[0].corrected_end_sec}")
+    check(results[0].reason == REASON_SAME_PITCH, f"expected same_pitch_restrike, got {results[0].reason}")
+
+
+def test_release_missing_finger_release_falls_back():
+    inputs = [ReleaseInput(start_sec=0.0, original_end_sec=1.2, hand="R", finger=1, pitch=60)]
+    results = compute_corrected_ends(inputs)
+    check(approx(results[0].corrected_end_sec, 1.2), f"expected original offset 1.2, got {results[0].corrected_end_sec}")
+    check(results[0].reason == REASON_ORIGINAL, f"expected original_midi_offset, got {results[0].reason}")
+
+    inputs_no_end = [ReleaseInput(start_sec=0.0, original_end_sec=None, hand="R", finger=1, pitch=60)]
+    results_no_end = compute_corrected_ends(inputs_no_end)
+    check(approx(results_no_end[0].corrected_end_sec, 0.3), f"expected fallback estimate 0.3, got {results_no_end[0].corrected_end_sec}")
+    check(results_no_end[0].reason == REASON_FALLBACK, f"expected fallback_estimate, got {results_no_end[0].reason}")
+
+
+def test_release_fast_passage_no_overlap():
+    starts = [0.0, 0.2, 0.4, 0.6]
+    inputs = [
+        ReleaseInput(start_sec=s, original_end_sec=s + 2.0, hand="L", finger=3, pitch=60 + i)
+        for i, s in enumerate(starts)
+    ]
+    results = compute_corrected_ends(inputs)
+    for i in range(len(inputs) - 1):
+        check(results[i].corrected_end_sec <= starts[i + 1], f"note {i} should release before the next same-finger onset")
+        check(results[i].corrected_end_sec >= starts[i], f"note {i} should not release before its own onset")
+        check(results[i].reason == REASON_SAME_FINGER, f"expected same_finger_new_note for note {i}, got {results[i].reason}")
+
+
+def test_release_chord_independent_fingers():
+    inputs = [
+        ReleaseInput(start_sec=0.0, original_end_sec=1.0, hand="R", finger=1, pitch=60),
+        ReleaseInput(start_sec=0.0, original_end_sec=1.0, hand="R", finger=2, pitch=64),
+        ReleaseInput(start_sec=0.0, original_end_sec=1.0, hand="R", finger=3, pitch=67),
+    ]
+    results = compute_corrected_ends(inputs)
+    for r in results:
+        check(approx(r.corrected_end_sec, 1.0), f"chord notes with independent fingers should keep their original end, got {r.corrected_end_sec}")
+        check(r.reason == REASON_ORIGINAL, f"expected original_midi_offset, got {r.reason}")
+
+
+def test_release_clamps_min_key_duration():
+    inputs = [
+        ReleaseInput(start_sec=0.0, original_end_sec=1.0, hand="R", finger=1, pitch=60),
+        ReleaseInput(start_sec=0.01, original_end_sec=1.0, hand="R", finger=1, pitch=62),
+    ]
+    results = compute_corrected_ends(inputs, margin_sec=0.015)
+    r0 = results[0]
+    check(r0.corrected_end_sec >= inputs[0].start_sec, "corrected end must not precede the note's own onset")
+    check(r0.corrected_end_sec <= inputs[0].original_end_sec, "corrected end must not exceed the original (sound) end")
+    check(r0.corrected_end_sec > inputs[0].start_sec, "corrected end should be a sane positive tiny duration, not zero")
+    check(approx(r0.corrected_end_sec, inputs[0].start_sec + 0.03), f"expected the min-key-duration floor to apply, got {r0.corrected_end_sec}")
+
+
 TESTS = [
     test_white_index_roundtrip,
     test_homography_known_corners_to_expected_pitches,
@@ -1355,6 +1445,13 @@ TESTS = [
     test_calibration_depth_aware_reconstruction,
     test_calibration_depth_aware_round_trip,
     test_calibration_backward_compat_single_row,
+    test_release_same_finger_new_note,
+    test_release_sustain_pedal_key_shorter_than_sound,
+    test_release_same_pitch_restrike,
+    test_release_missing_finger_release_falls_back,
+    test_release_fast_passage_no_overlap,
+    test_release_chord_independent_fingers,
+    test_release_clamps_min_key_duration,
 ]
 
 
