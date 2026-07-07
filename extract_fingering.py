@@ -1679,7 +1679,9 @@ def _write_analysis_outputs(args: argparse.Namespace) -> None:
         bundle_path = default_bundle_path(args.out)
         try:
             metadata = {"artist": args.artist, "title": args.title, "genre": args.genre, "difficulty": args.difficulty} if (args.artist or args.title or args.genre or args.difficulty) else None
-            write_symple_bundle(bundle_path, args.midi, args.out, source_video=args.video, metadata=metadata)
+            pedal = args._analysis_result.get("pedal")
+            extra_data = {"pedal.json": json.dumps(pedal, indent=2)} if pedal else None
+            write_symple_bundle(bundle_path, args.midi, args.out, source_video=args.video, metadata=metadata, extra_data=extra_data)
             print(f"Wrote {bundle_path} (MIDI + fingering, for one-step loading in Symplethesia)")
         except Exception as exc:
             print(f"  (could not write .symple bundle: {exc})")

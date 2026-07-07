@@ -26,6 +26,7 @@ def write_symple_bundle(
     fingering_json_path: str,
     source_video: str | None = None,
     extra_files: dict | None = None,
+    extra_data: dict | None = None,
     metadata: dict | None = None,
 ) -> str:
     """Writes ``out_path`` (conventionally ending in `.symple`) containing:
@@ -46,6 +47,8 @@ def write_symple_bundle(
     contents = ["song.mid", "fingering.json", "DISCLAIMER.txt"]
     if extra_files:
         contents.extend(sorted(extra_files.keys()))
+    if extra_data:
+        contents.extend(k for k in sorted(extra_data.keys()) if k not in contents)
 
     manifest = {
         "version": BUNDLE_VERSION,
@@ -72,6 +75,9 @@ def write_symple_bundle(
         if extra_files:
             for arcname, path in extra_files.items():
                 zf.write(path, arcname)
+        if extra_data:
+            for arcname, data in extra_data.items():
+                zf.writestr(arcname, data if isinstance(data, (bytes, str)) else json.dumps(data))
 
     return out_path
 

@@ -329,6 +329,12 @@ class FingeringGUI:
 
         style.configure("Vertical.TScrollbar", background=COLOR_CARD, troughcolor=COLOR_BG, bordercolor=COLOR_BG)
 
+        style.configure("Treeview", background=COLOR_CARD, foreground=COLOR_INK,
+                        fieldbackground=COLOR_CARD, borderwidth=0, font=self.default_font)
+        style.configure("Treeview.Heading", background=COLOR_BG2, foreground=COLOR_MUT,
+                        borderwidth=0, font=self.default_font)
+        style.map("Treeview", background=[("selected", COLOR_ACC)], foreground=[("selected", COLOR_BG)])
+
     def _set_window_icon(self):
         try:
             if ICON_PATH.exists():
@@ -375,6 +381,10 @@ class FingeringGUI:
         self.genre_var = tk.StringVar(value="")
         self.difficulty_var = tk.StringVar(value="")
         self.extracted_video_title = None  # Store title extracted from log
+        self.batch_mode_var = tk.BooleanVar(value=False)
+        self.batch_urls: list = []
+        self._batch_tree_ids: list = []
+        self._batch_current_idx: int = -1
 
     def _build_header_logo(self, parent):
         """Persistent header banner (smape.png), scaled to a fixed height.
@@ -563,6 +573,36 @@ class FingeringGUI:
         self.page1_status_label = ttk.Label(page, textvariable=self.page1_status_var, style="CardMuted.TLabel")
         self.page1_status_label.pack(anchor="w", pady=(8, 0))
 
+        ttk.Checkbutton(
+            page, text="Process multiple videos (batch mode)",
+            variable=self.batch_mode_var, command=self._on_batch_toggled,
+            style="Tooltip.TCheckbutton",
+        ).pack(anchor="w", pady=(10, 0))
+
+        # Batch queue panel (hidden by default, revealed by _on_batch_toggled)
+        self.batch_queue_frame = ttk.Frame(page, style="Card.TFrame")
+
+        queue_inner = ttk.Frame(self.batch_queue_frame, style="Card.TFrame")
+        queue_inner.pack(fill="x")
+        self.batch_listbox = tk.Listbox(
+            queue_inner, height=4, bg=COLOR_BG, fg=COLOR_INK,
+            selectbackground=COLOR_ACC, selectforeground=COLOR_BG,
+            font=self.mono_font, relief="flat", highlightthickness=1,
+            highlightbackground=COLOR_BORDER, width=52,
+        )
+        lb_scroll = ttk.Scrollbar(queue_inner, orient="vertical", command=self.batch_listbox.yview)
+        self.batch_listbox.configure(yscrollcommand=lb_scroll.set)
+        self.batch_listbox.pack(side="left", fill="x", expand=True)
+        lb_scroll.pack(side="right", fill="y")
+
+        batch_btn_row = ttk.Frame(self.batch_queue_frame, style="Card.TFrame")
+        batch_btn_row.pack(fill="x", pady=(6, 0))
+        ttk.Button(batch_btn_row, text="Add URL ↑", command=self._add_to_batch).pack(side="left")
+        ttk.Button(batch_btn_row, text="Remove", command=self._remove_from_batch).pack(side="left", padx=(6, 0))
+        ttk.Button(batch_btn_row, text="Clear", command=self._clear_batch).pack(side="left", padx=(6, 0))
+        self.batch_count_label = ttk.Label(batch_btn_row, text="", style="CardMuted.TLabel")
+        self.batch_count_label.pack(side="right")
+
         ttk.Button(
             page, text="Next →", style="Primary.TButton", command=self._on_next_from_page1,
         ).pack(anchor="e", pady=(18, 0))
@@ -574,11 +614,17 @@ class FingeringGUI:
         return page
 
     def _on_next_from_page1(self):
-        video = self.video_var.get().strip()
-        if not video:
-            self.page1_status_var.set("Paste a YouTube link or open a local file first.")
-            self.page1_status_label.configure(foreground=COLOR_DEL)
-            return
+        if self.batch_mode_var.get():
+            if not self.batch_urls:
+                self.page1_status_var.set("Add at least one URL to the batch queue first.")
+                self.page1_status_label.configure(foreground=COLOR_DEL)
+                return
+        else:
+            video = self.video_var.get().strip()
+            if not video:
+                self.page1_status_var.set("Paste a YouTube link or open a local file first.")
+                self.page1_status_label.configure(foreground=COLOR_DEL)
+                return
         self.page1_status_var.set("")
         self._show_page(2)
 
@@ -667,6 +713,7 @@ class FingeringGUI:
             self.midi_only_var.set(True)
             self._on_transcribe_toggled()
         self._refresh_page3_for_mode()
+        self._refresh_batch_progress_visibility()
         if self.transcribe_var.get() and not self.video_var.get().strip().startswith(("http://", "https://")):
             self._maybe_default_out(self.video_var.get().strip())
         self._show_page(3)
@@ -702,14 +749,38 @@ class FingeringGUI:
             self.midi_entry.drop_target_register(DND_FILES)
             self.midi_entry.dnd_bind("<<Drop>>", self._on_drop_midi)
 
-        # Metadata section
-        meta_sep = ttk.Frame(page, height=2)
+        # Middle section: always-packed container; swaps between metadata
+        # (single-video) and batch-progress Treeview (batch mode).
+        middle_container = ttk.Frame(page)
+        middle_container.pack(fill="x")
+
+        # Batch progress panel (hidden by default)
+        self.batch_progress_frame = ttk.Frame(middle_container)
+        bp_label = ttk.Label(self.batch_progress_frame, text="Batch queue", style="Muted.TLabel")
+        bp_label.pack(fill="x", padx=16, pady=(10, 4))
+        tree_frame = ttk.Frame(self.batch_progress_frame)
+        tree_frame.pack(fill="x", padx=16, pady=(0, 6))
+        self.queue_tree = ttk.Treeview(
+            tree_frame, columns=("status",), show="headings", height=5, selectmode="none",
+        )
+        self.queue_tree.heading("status", text="Video / Status", anchor="w")
+        self.queue_tree.column("status", width=560, stretch=True)
+        qt_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.queue_tree.yview)
+        self.queue_tree.configure(yscrollcommand=qt_scroll.set)
+        self.queue_tree.pack(side="left", fill="x", expand=True)
+        qt_scroll.pack(side="right", fill="y")
+
+        # Metadata section (shown in single-video mode)
+        self.metadata_section = ttk.Frame(middle_container)
+        self.metadata_section.pack(fill="x")
+
+        meta_sep = ttk.Frame(self.metadata_section, height=2)
         meta_sep.pack(fill="x", padx=16, pady=(12, 8))
 
-        meta_label = ttk.Label(page, text="Metadata (optional)", style="Muted.TLabel")
+        meta_label = ttk.Label(self.metadata_section, text="Metadata (optional)", style="Muted.TLabel")
         meta_label.pack(fill="x", padx=16, pady=(0, 6))
 
-        meta_form = ttk.Frame(page)
+        meta_form = ttk.Frame(self.metadata_section)
         meta_form.pack(fill="x", padx=16, pady=(0, 0))
         meta_form.columnconfigure(1, weight=1)
 
@@ -795,6 +866,8 @@ class FingeringGUI:
     def _on_restart(self):
         """Go back to page 1 (video selection) after stopping any running process."""
         self._on_stop()
+        self.video_var.set("")
+        self.extracted_video_title = None
         self._show_page(1)
 
     def _autofill_from_extracted_title(self):
@@ -918,7 +991,7 @@ class FingeringGUI:
         self._build_settings_contents(win)
 
         self.root.update_idletasks()
-        w, h = 460, 620
+        w, h = 700, 620
         x = self.root.winfo_x() + self.root.winfo_width() - w - 30
         y = self.root.winfo_y() + self.root.winfo_height() - h - 30
         win.geometry(f"{w}x{h}+{max(x, 0)}+{max(y, 0)}")
@@ -1341,12 +1414,16 @@ class FingeringGUI:
 
     # -- validation -----------------------------------------------------------
     def _validate(self):
-        video = self.video_var.get().strip()
-        midi = self.midi_var.get().strip()
-        if not video:
-            return "Video field is required (paste a YouTube URL, or Browse/drop a local file)."
-        if not midi and not self.transcribe_var.get():
-            return "MIDI field is required (Browse/drop a .mid file), or choose a Transcribe-based mode."
+        if self.batch_mode_var.get():
+            if not self.batch_urls:
+                return "Add at least one URL to the batch queue."
+        else:
+            video = self.video_var.get().strip()
+            midi = self.midi_var.get().strip()
+            if not video:
+                return "Video field is required (paste a YouTube URL, or Browse/drop a local file)."
+            if not midi and not self.transcribe_var.get():
+                return "MIDI field is required (Browse/drop a .mid file), or choose a Transcribe-based mode."
 
         offset = self.offset_var.get().strip()
         if offset:
@@ -1397,6 +1474,8 @@ class FingeringGUI:
 
     # -- run / stop -------------------------------------------------------------
     def _build_argv(self):
+        if self.batch_mode_var.get():
+            return self._build_batch_argv()
         argv = [
             self.python_exe,
             str(EXTRACT_SCRIPT),
@@ -1477,6 +1556,9 @@ class FingeringGUI:
         if error:
             self._set_status(error, error=True)
             return
+
+        if self.batch_mode_var.get():
+            self._init_batch_progress()
 
         argv = self._build_argv()
 
@@ -1597,6 +1679,23 @@ class FingeringGUI:
                 kind, payload = self.log_queue.get_nowait()
                 if kind == "line":
                     self._log(payload)
+                    # Parse batch progress lines
+                    if self.batch_mode_var.get():
+                        stripped = payload.strip()
+                        if stripped.startswith("--- Phase 2:") and stripped.endswith("---"):
+                            title = stripped[len("--- Phase 2:"):].rstrip("-").strip()
+                            # Mark previous as done if still running
+                            if self._batch_current_idx >= 0:
+                                if self._get_batch_item_status(self._batch_current_idx) == "▶ running":
+                                    self._update_batch_item(self._batch_current_idx, status="✓ done")
+                            self._batch_current_idx += 1
+                            self._update_batch_item(self._batch_current_idx, label=title, status="▶ running")
+                        elif stripped.startswith("FAILED:") and self._batch_current_idx >= 0:
+                            self._update_batch_item(self._batch_current_idx, status="✗ failed")
+                        elif stripped.startswith("batch done:"):
+                            for i in range(len(self._batch_tree_ids)):
+                                if self._get_batch_item_status(i) == "▶ running":
+                                    self._update_batch_item(i, status="✓ done")
                     # Extract video title from a yt-dlp download log line. Two
                     # patterns, depending on whether the file is fresh or cached:
                     #   "[download] Destination: /path/Title Here.mp4"
@@ -1629,16 +1728,136 @@ class FingeringGUI:
         self.run_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
         self.proc = None
-        if returncode == 0:
+        if self.batch_mode_var.get():
+            if returncode == 0:
+                self._set_status(f"Batch done — {len(self.batch_urls)} video(s) processed. See log for paths.", error=False)
+            else:
+                self._set_status("Batch finished with failures — see log above for details.", error=True)
+        elif returncode == 0:
             out = self.out_var.get().strip()
             if out:
                 self._set_status(f"Done — wrote {Path(out).expanduser().resolve()}", error=False)
             else:
-                # --out was omitted; extract_fingering.py derived its own
-                # default and already printed the real path in the log above.
                 self._set_status("Done — see log above for the output path.", error=False)
         else:
             self._set_status(f"Failed (exit code {returncode}) — see log above for details.", error=True)
+
+    # -- batch helpers ----------------------------------------------------------
+    def _on_batch_toggled(self):
+        if self.batch_mode_var.get():
+            self.batch_queue_frame.pack(fill="x", pady=(8, 0))
+        else:
+            self.batch_queue_frame.pack_forget()
+
+    def _add_to_batch(self):
+        url = self.video_var.get().strip()
+        if not url:
+            self.page1_status_var.set("Enter a URL in the field above first.")
+            self.page1_status_label.configure(foreground=COLOR_DEL)
+            return
+        if url in self.batch_urls:
+            self.page1_status_var.set("That URL is already in the queue.")
+            self.page1_status_label.configure(foreground=COLOR_WARN)
+            return
+        self.batch_urls.append(url)
+        self.batch_listbox.insert("end", url)
+        self.batch_count_label.configure(text=f"{len(self.batch_urls)} URL(s)")
+        self.page1_status_var.set(f"Added to queue. {len(self.batch_urls)} URL(s) queued.")
+        self.page1_status_label.configure(foreground=COLOR_OK)
+
+    def _remove_from_batch(self):
+        sel = self.batch_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        self.batch_listbox.delete(idx)
+        del self.batch_urls[idx]
+        self.batch_count_label.configure(text=f"{len(self.batch_urls)} URL(s)" if self.batch_urls else "")
+
+    def _clear_batch(self):
+        self.batch_listbox.delete(0, "end")
+        self.batch_urls.clear()
+        self.batch_count_label.configure(text="")
+
+    def _refresh_batch_progress_visibility(self):
+        if self.batch_mode_var.get():
+            self.metadata_section.pack_forget()
+            self.batch_progress_frame.pack(fill="x")
+        else:
+            self.batch_progress_frame.pack_forget()
+            self.metadata_section.pack(fill="x")
+
+    def _init_batch_progress(self):
+        for item in self.queue_tree.get_children():
+            self.queue_tree.delete(item)
+        self._batch_tree_ids = []
+        self._batch_current_idx = -1
+        for url in self.batch_urls:
+            item_id = self.queue_tree.insert("", "end", values=(f"⏳  {url}",))
+            self._batch_tree_ids.append(item_id)
+
+    def _update_batch_item(self, idx: int, label: str = None, status: str = None):
+        if 0 <= idx < len(self._batch_tree_ids):
+            item_id = self._batch_tree_ids[idx]
+            if label is not None or status is not None:
+                cur = self.queue_tree.item(item_id, "values")
+                cur_text = cur[0] if cur else ""
+                # Separate stored label (after first emoji+spaces) from prefix
+                if status is None:
+                    # Keep current status emoji, update label
+                    prefix = cur_text.split("  ", 1)[0] + "  " if "  " in cur_text else "  "
+                    new_text = prefix + (label or "")
+                elif label is None:
+                    # Keep current label, update status emoji
+                    existing_label = cur_text.split("  ", 1)[1] if "  " in cur_text else cur_text
+                    emoji = {"⏳ pending": "⏳", "▶ running": "▶", "✓ done": "✓", "✗ failed": "✗"}.get(status, "")
+                    new_text = f"{emoji}  {existing_label}"
+                else:
+                    emoji = {"⏳ pending": "⏳", "▶ running": "▶", "✓ done": "✓", "✗ failed": "✗"}.get(status, "")
+                    new_text = f"{emoji}  {label}"
+                self.queue_tree.item(item_id, values=(new_text,))
+            self.queue_tree.see(item_id)
+
+    def _get_batch_item_status(self, idx: int) -> str:
+        if 0 <= idx < len(self._batch_tree_ids):
+            vals = self.queue_tree.item(self._batch_tree_ids[idx], "values")
+            if vals:
+                text = vals[0]
+                if text.startswith("▶"):
+                    return "▶ running"
+                if text.startswith("✓"):
+                    return "✓ done"
+                if text.startswith("✗"):
+                    return "✗ failed"
+        return "⏳ pending"
+
+    def _build_batch_argv(self) -> list:
+        argv = [self.python_exe, str(EXTRACT_SCRIPT), "--batch"] + list(self.batch_urls) + [
+            "--transcribe",
+            "--calibration", self.calibration_var.get().strip(),
+            "--fps", str(float(self.fps_var.get())),
+            "--min-hand-confidence", str(float(self.min_hand_conf_var.get())),
+            "--confidence-threshold", str(float(self.conf_var.get())),
+        ]
+        output_dir = self.output_dir_var.get().strip()
+        if output_dir:
+            argv += ["--output-dir", output_dir]
+        if not self.bundle_var.get():
+            argv.append("--no-bundle")
+        if self.render_var.get():
+            argv.append("--render")
+            if self.flip_render_hands_var.get():
+                argv.append("--flip-render-hands")
+            if self.pick_hand_colors_var.get():
+                argv.append("--pick-hand-colors")
+        elif self.midi_only_var.get():
+            argv.append("--midi-only")
+        if self.no_gpu_var.get():
+            argv.append("--no-gpu")
+        onset_threshold = self.onset_threshold_var.get().strip()
+        if onset_threshold:
+            argv += ["--onset-threshold", onset_threshold]
+        return argv
 
     # -- log / status helpers -----------------------------------------------
     def _log(self, text):

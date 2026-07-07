@@ -893,22 +893,17 @@ def interactive_calibrate(
         picker = tk.Toplevel(root)
         picker.title("Select key")
 
-        # Fit to screen: leave 100px margin on each side
+        # Compact fixed size -- just two rows of C/G buttons
+        picker_w, picker_h = 480, 160
+        picker.update_idletasks()
         screen_w = picker.winfo_screenwidth()
         screen_h = picker.winfo_screenheight()
-        margin = 100
-        max_w = max(400, screen_w - 2 * margin)
-        max_h = max(250, screen_h - 2 * margin)
-        picker.geometry(f"{max_w}x{max_h}")
-
-        # Center on screen
-        picker.update_idletasks()
-        x = max(0, (screen_w - max_w) // 2)
-        y = max(0, (screen_h - max_h) // 2)
-        picker.geometry(f"{max_w}x{max_h}+{x}+{y}")
+        x = max(0, (screen_w - picker_w) // 2)
+        y = max(0, (screen_h - picker_h) // 2)
+        picker.geometry(f"{picker_w}x{picker_h}+{x}+{y}")
 
         style = ttk.Style(picker)
-        style.configure("Big.TButton", font=("Arial", 21))
+        style.configure("Key.TButton", font=("Arial", 12))
 
         result = {"pitch": None}
 
@@ -917,7 +912,7 @@ def interactive_calibrate(
             picker.destroy()
 
         frame = ttk.Frame(picker)
-        frame.pack(padx=18, pady=18, fill="both", expand=True)
+        frame.pack(padx=10, pady=10, fill="both", expand=True)
         # Only C and G notes, spanning the full keyboard (pitch 12 = C0
         # through pitch 108 = C8) -- enough to reference any key while
         # keeping the picker uncluttered.
@@ -930,9 +925,9 @@ def interactive_calibrate(
                 row = ttk.Frame(frame)
                 row.pack(fill="x")
             ttk.Button(
-                row, text=note_name, width=7, command=lambda p=pitch: on_select(p),
-                style="Big.TButton",
-            ).pack(side="left", padx=4, pady=4)
+                row, text=note_name, width=4, command=lambda p=pitch: on_select(p),
+                style="Key.TButton",
+            ).pack(side="left", padx=2, pady=2)
 
         def on_close():
             picker.destroy()
