@@ -385,6 +385,8 @@ class FingeringGUI:
         self.batch_urls: list = []
         self._batch_tree_ids: list = []
         self._batch_current_idx: int = -1
+        self._last_run_json: str = None
+        self._last_run_bundle: str = None
 
     def _build_header_logo(self, parent):
         """Persistent header banner (smape.png), scaled to a fixed height.
@@ -466,7 +468,8 @@ class FingeringGUI:
         self.page1 = self._build_page1(self.root)
         self.page2 = self._build_page2(self.root)
         self.page3 = self._build_page3(self.root)
-        self.pages = {1: self.page1, 2: self.page2, 3: self.page3}
+        self.page4 = self._build_page4(self.root)
+        self.pages = {1: self.page1, 2: self.page2, 3: self.page3, 4: self.page4}
 
         # Footer: links and donate button at the bottom
         self._build_footer(self.root)
@@ -837,6 +840,106 @@ class FingeringGUI:
         scroll.pack(side="right", fill="y")
 
         return page
+
+    # -- page 4: metadata editor (shown after a successful single-video run) ----
+    def _build_page4(self, parent):
+        page = ttk.Frame(parent, style="Card.TFrame", padding=28)
+
+        ttk.Label(page, text="Metadata", style="CardHeading.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            page,
+            text="Auto-filled from the video title — edit if needed, then save to the .symple bundle.",
+            style="CardMuted.TLabel",
+        ).pack(anchor="w", pady=(0, 18))
+
+        form = ttk.Frame(page, style="Card.TFrame")
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(form, text="Artist:", style="CardMuted.TLabel").grid(row=0, column=0, sticky="w", pady=5)
+        ttk.Entry(form, textvariable=self.artist_var, width=36).grid(row=0, column=1, sticky="ew", padx=8, pady=5)
+
+        swap_btn = ttk.Button(form, text="⇄", width=3, command=self._swap_artist_title)
+        swap_btn.grid(row=0, column=2, rowspan=2, padx=(0, 0), pady=5)
+        Tooltip(swap_btn, key="swap_artist_title_p4", text="Swap Artist and Title", prefs=self.prefs)
+
+        ttk.Label(form, text="Title:", style="CardMuted.TLabel").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(form, textvariable=self.title_var, width=36).grid(row=1, column=1, sticky="ew", padx=8, pady=5)
+
+        ttk.Label(form, text="Genre:", style="CardMuted.TLabel").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(form, textvariable=self.genre_var, width=36).grid(row=2, column=1, sticky="ew", padx=8, pady=5)
+
+        ttk.Label(form, text="Difficulty:", style="CardMuted.TLabel").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Combobox(
+            form, textvariable=self.difficulty_var, state="readonly",
+            values=["", "easy", "intermediate", "advanced", "expert"], width=20,
+        ).grid(row=3, column=1, sticky="w", padx=8, pady=5)
+
+        self.p4_status_var = tk.StringVar(value="")
+        self.p4_status_label = tk.Label(
+            page, textvariable=self.p4_status_var, anchor="w",
+            bg=COLOR_CARD, fg=COLOR_OK, font=self.default_font,
+        )
+        self.p4_status_label.pack(fill="x", pady=(16, 0))
+
+        btn_row = ttk.Frame(page, style="Card.TFrame")
+        btn_row.pack(fill="x", pady=(12, 0))
+        ttk.Button(btn_row, text="← Run again", command=lambda: self._show_page(3)).pack(side="left")
+        ttk.Button(
+            btn_row, text="Save to .symple bundle", style="Primary.TButton",
+            command=self._save_metadata,
+        ).pack(side="left", padx=(10, 0))
+        ttk.Button(btn_row, text="Done →", command=self._on_done_metadata).pack(side="right")
+
+        return page
+
+    def _on_done_metadata(self):
+        self.video_var.set("")
+        self.extracted_video_title = None
+        self._last_run_json = None
+        self._last_run_bundle = None
+        self._show_page(1)
+
+    def _save_metadata(self):
+        import zipfile, json as _json
+        bundle_path = self._last_run_bundle
+        if not bundle_path or not os.path.exists(bundle_path):
+            # Derive from known JSON path
+            out_json = self._last_run_json or self.out_var.get().strip()
+            if out_json:
+                base = out_json
+                for sfx in (".fingering.json", ".json"):
+                    if base.endswith(sfx):
+                        base = base[: -len(sfx)]
+                        break
+                bundle_path = base + ".symple"
+        if not bundle_path or not os.path.exists(bundle_path):
+            self.p4_status_var.set("No .symple bundle found — run the analysis first.")
+            self.p4_status_label.configure(fg=COLOR_DEL)
+            return
+        metadata = {k: v for k, v in [
+            ("artist", self.artist_var.get().strip()),
+            ("title", self.title_var.get().strip()),
+            ("genre", self.genre_var.get().strip()),
+            ("difficulty", self.difficulty_var.get().strip()),
+        ] if v}
+        try:
+            with zipfile.ZipFile(bundle_path, "r") as zf:
+                manifest = _json.loads(zf.read("manifest.json"))
+                contents = {name: zf.read(name) for name in zf.namelist() if name != "manifest.json"}
+            if metadata:
+                manifest["metadata"] = metadata
+            elif "metadata" in manifest:
+                del manifest["metadata"]
+            with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("manifest.json", _json.dumps(manifest, indent=2))
+                for name, data in contents.items():
+                    zf.writestr(name, data)
+            self.p4_status_var.set(f"Saved to {Path(bundle_path).name}")
+            self.p4_status_label.configure(fg=COLOR_OK)
+        except Exception as exc:
+            self.p4_status_var.set(f"Save failed: {exc}")
+            self.p4_status_label.configure(fg=COLOR_DEL)
 
     def _on_back_from_page3(self):
         self._show_page(2)
@@ -1695,6 +1798,17 @@ class FingeringGUI:
                             for i in range(len(self._batch_tree_ids)):
                                 if self._get_batch_item_status(i) == "▶ running":
                                     self._update_batch_item(i, status="✓ done")
+                    # Track output paths for the metadata page (single-video only)
+                    if not self.batch_mode_var.get():
+                        s = payload.strip()
+                        if s.startswith("Wrote ") and s.endswith(".fingering.json"):
+                            p = s[len("Wrote "):].strip()
+                            if os.path.exists(p):
+                                self._last_run_json = p
+                        elif s.startswith("Wrote ") and ".symple " in s:
+                            p = s[len("Wrote "):].split(" ")[0].strip()
+                            if p.endswith(".symple") and os.path.exists(p):
+                                self._last_run_bundle = p
                     # Extract video title from a yt-dlp download log line. Two
                     # patterns, depending on whether the file is fresh or cached:
                     #   "[download] Destination: /path/Title Here.mp4"
@@ -1733,11 +1847,15 @@ class FingeringGUI:
             else:
                 self._set_status("Batch finished with failures — see log above for details.", error=True)
         elif returncode == 0:
-            out = self.out_var.get().strip()
-            if out:
-                self._set_status(f"Done — wrote {Path(out).expanduser().resolve()}", error=False)
-            else:
-                self._set_status("Done — see log above for the output path.", error=False)
+            # Go to dedicated metadata page so user can review/save metadata
+            self._autofill_metadata()
+            self.p4_status_var.set(
+                f"Bundle ready: {Path(self._last_run_bundle).name}"
+                if self._last_run_bundle and os.path.exists(self._last_run_bundle)
+                else "Run completed — fill in metadata and save to bundle."
+            )
+            self.p4_status_label.configure(fg=COLOR_OK)
+            self._show_page(4)
         else:
             self._set_status(f"Failed (exit code {returncode}) — see log above for details.", error=True)
 

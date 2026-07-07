@@ -178,27 +178,27 @@ def plan_phase1(
 # --------------------------------------------------------------------------
 
 def batch_process(sources: list, args: argparse.Namespace) -> int:
-    """Runs the full two-phase batch pipeline over ``sources`` and returns a
-    process exit code (0 if every video succeeded, 1 if any failed).
+    """Runs the full three-phase batch pipeline over ``sources``.
 
-    Phase 0: expand playlists/files into a flat video list.
-    Phase 1 (interactive, front-loaded): for each video, resolve its
-      calibration/colour storage keys, print a homogeneity report, and run
-      interactive calibration (+ colour picking, in --render mode) ONLY for
-      videos `plan_phase1` marks "manual" -- the first video of each channel
-      still missing saved data. Persists via the same stores
-      `_get_or_create_calibration`/`interactive_pick_hand_colors` already
-      write to, so Phase 2 (and later batches) find them saved.
-    Phase 2 (unattended): for each video, build a per-video copy of ``args``
-      (--transcribe, --no-align, headless reuse of saved calibration/colours)
-      and run `extract_fingering.analyze()` inside try/except so one bad
-      video never aborts the batch.
+    Phase 1 (fast preview download): fetch only the first ~45 s of every
+      video so the calibration UI can open immediately without waiting for
+      a full multi-GB download.  Each video gets its own preview subfolder
+      so previews don't clobber each other.
+    Phase 2 (interactive, front-loaded): for EVERY video in order, show
+      the key-overlay calibration UI (and the colour picker in --render
+      mode).  ``allow_headless_reuse=False`` forces the UI even for channels
+      that already have a saved calibration -- the user sees and confirms
+      every video before the long unattended phase starts.
+    Phase 3 (unattended): full download + KONG transcription + analysis for
+      each video, reusing the calibration saved in Phase 2.
     """
-    from calibration_store import calibration_key, load_saved_calibration
-    from color_store import color_key, load_saved_colors
+    from calibration_store import calibration_key
+    from color_store import color_key
     import extract_fingering
 
     needs_colors = bool(args.render)
+    low_pitch = args.low_pitch if args.low_pitch is not None else 21
+    high_pitch = args.high_pitch if args.high_pitch is not None else 108
 
     entries = expand_sources(sources)
     print(f"Batch: {len(entries)} video(s) found across {len(sources)} source(s).")
@@ -206,67 +206,80 @@ def batch_process(sources: list, args: argparse.Namespace) -> int:
         print("Nothing to process.")
         return 0
 
-    # Resolve each entry's storage key up front (channel_id when known, else
-    # a per-path hash -- same convention calibration_key/color_key already
-    # use elsewhere) and stash it on the entry for plan_phase1/Phase 2 reuse.
     for entry in entries:
         entry["channel_key"] = calibration_key(entry["url"], entry.get("channel_id"))
-        # color_key uses the identical (channel_id or path-hash) scheme, so
-        # for a given entry calibration_key/color_key always agree on
-        # channel-vs-path -- one channel_key string is enough for both
-        # has_saved_calib/has_saved_colors checks below.
-
-    def has_saved_calib(channel_key: str) -> bool:
-        return load_saved_calibration(channel_key) is not None
-
-    def has_saved_colors(channel_key: str) -> bool:
-        return load_saved_colors(channel_key) is not None
-
-    plan = plan_phase1(entries, has_saved_calib, has_saved_colors, needs_colors)
-    print(f"Phase 1: {plan['report']}")
 
     download_dir = os.path.join(extract_fingering.DOWNLOADS_DIR, "downloads")
 
-    for entry in plan["manual"]:
-        print(f"\n--- Phase 1 (manual): {entry.get('title') or entry['url']} ---")
+    # ------------------------------------------------------------------
+    # Phase 1: fast preview download (~45 s) for every video
+    # ------------------------------------------------------------------
+    print(f"\nPhase 1 of 3: fast preview download for {len(entries)} video(s)...")
+    for i, entry in enumerate(entries):
+        label = entry.get("title") or entry["url"]
+        print(f"  [{i + 1}/{len(entries)}] {label}")
+        url = entry["url"]
+        if url.startswith(("http://", "https://")):
+            # Each video gets its own subfolder so previews don't overwrite
+            # each other -- preview.mp4 inside batch_preview_000/, _001/, etc.
+            preview_dir = os.path.join(download_dir, f"batch_preview_{i:03d}")
+            preview_path, channel_id = extract_fingering._download_preview(url, preview_dir)
+            if channel_id:
+                entry["channel_id"] = channel_id
+                entry["channel_key"] = calibration_key(url, channel_id)
+            if preview_path is None:
+                print(f"    preview download failed; will try full download in Phase 3")
+        else:
+            # Local file: use it directly as the calibration source
+            preview_path = url if os.path.exists(url) else None
+            if preview_path is None:
+                print(f"    local file not found: {url}")
+        entry["_preview_path"] = preview_path
+
+    # ------------------------------------------------------------------
+    # Phase 2: interactive key overlay + colour check for every video
+    # ------------------------------------------------------------------
+    print(f"\nPhase 2 of 3: key overlay check for {len(entries)} video(s) (one by one)...")
+    for i, entry in enumerate(entries):
+        label = entry.get("title") or entry["url"]
+        preview = entry.get("_preview_path")
+        if preview is None:
+            print(f"\n  [{i + 1}/{len(entries)}] SKIP (no preview): {label}")
+            continue
+        print(f"\n--- Calibration [{i + 1}/{len(entries)}]: {label} ---")
         try:
-            video_path, _audio_path, resolved_channel_id = extract_fingering._download_if_url(
-                entry["url"], download_dir,
-            )
-            calib_key = calibration_key(entry["url"], resolved_channel_id or entry.get("channel_id"))
-            color_key_ = color_key(entry["url"], resolved_channel_id or entry.get("channel_id"))
-
-            # Full 88-key range: batch's --transcribe mode has no MIDI yet at
-            # calibration time, same reasoning as analyze()'s early-preview path.
-            low_pitch = args.low_pitch if args.low_pitch is not None else 21
-            high_pitch = args.high_pitch if args.high_pitch is not None else 108
-
+            calib_key_ = calibration_key(entry["url"], entry.get("channel_id"))
+            # allow_headless_reuse=False: always open the UI so the user can
+            # verify every video before the long unattended phase begins.
             extract_fingering._get_or_create_calibration(
-                video_path, args.calibration, low_pitch, high_pitch,
+                preview, args.calibration, low_pitch, high_pitch,
                 use_cv_calibration=not args.no_cv_calibration,
-                calib_key=calib_key,
+                calib_key=calib_key_,
+                allow_headless_reuse=False,
             )
-
             if needs_colors:
                 from render_hands import interactive_pick_hand_colors
                 from color_store import save_colors
 
                 print("Opening hand-color picker (scrub with arrow keys, click a lit key, ESC when done)...")
-                picked = interactive_pick_hand_colors(video_path)
+                picked = interactive_pick_hand_colors(preview)
                 picked = extract_fingering._apply_hand_color_fallback_and_log(entry["url"], picked)
-                save_colors(color_key_, picked)
+                save_colors(color_key(entry["url"], entry.get("channel_id")), picked)
         except Exception as exc:  # noqa: BLE001
-            print(f"  Phase 1 setup failed for {entry['url']}: {exc} -- interactive calibration/colours is not possible headlessly; this video will likely fail Phase 2 too.")
+            print(f"  Calibration failed: {exc} -- this video will likely fail Phase 3 too.")
 
-    print("\nPhase 2: unattended transcribe + analyze for all videos.")
+    # ------------------------------------------------------------------
+    # Phase 3: unattended full download + transcribe + analyze
+    # ------------------------------------------------------------------
+    print(f"\nPhase 3 of 3: unattended transcription + analysis for {len(entries)} video(s).")
     results = []  # (url, ok, err)
     for entry in entries:
-        print(f"\n--- Phase 2: {entry.get('title') or entry['url']} ---")
+        print(f"\n--- Phase 2: {entry.get('title') or entry['url']} ---")  # "Phase 2" kept for GUI parser
         video_args = copy.deepcopy(args)
         video_args.video = entry["url"]
         video_args.transcribe = True
         video_args.no_align = True
-        video_args.out = None  # re-derive per video from its own filename
+        video_args.out = None
         video_args.output_dir = args.output_dir
         video_args.headless_reuse = True
 
@@ -282,7 +295,7 @@ def batch_process(sources: list, args: argparse.Namespace) -> int:
 
     ok_count = sum(1 for _, ok, _ in results if ok)
     fail_count = len(results) - ok_count
-    print(f"\nbatch done: {ok_count} ok, {fail_count} failed, 0 skipped")
+    print(f"\nbatch done: {ok_count} ok, {fail_count} failed")
     if fail_count:
         print("Failures:")
         for url, ok, err in results:
