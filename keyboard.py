@@ -24,6 +24,7 @@ MIDI pitch 21 = A0 (lowest key on 88-key piano), 108 = C8 (highest).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -310,17 +311,27 @@ def draw_keyboard_overlay(frame, calib, highlight_pitch=None, height_px: int = 2
                     x2, y2 = int(round(near_pt[0])), int(round(near_pt[1]))
                     cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 1, cv2.LINE_AA)
                 else:
-                    # Standard overhead: draw vertical tick
+                    # Standard overhead: draw tick at rotation_deg from vertical
                     x, y = wi_to_screen(edge)
-                    cv2.line(frame, (x, y - height_px), (x, y + height_px), (0, 255, 255), 1, cv2.LINE_AA)
+                    _rot = math.radians(calib.rotation_deg)
+                    _cdx = int(round(height_px * math.sin(_rot)))
+                    _cdy = int(round(height_px * math.cos(_rot)))
+                    cv2.line(frame, (x - _cdx, y - _cdy), (x + _cdx, y + _cdy), (0, 255, 255), 1, cv2.LINE_AA)
 
-        # Black keys: short thick orange mark above the key line, at each black
-        # key's fractional index.
+        # Black keys: short thick orange mark at each black key's fractional index,
+        # drawn at the same rotation angle as the white-key separators.
+        _rot_bk = math.radians(calib.rotation_deg)
+        _sin_bk = math.sin(_rot_bk)
+        _cos_bk = math.cos(_rot_bk)
         for pitch in range(lo, hi + 1):
             if _IS_WHITE[pitch % 12]:
                 continue
             x, y = wi_to_screen(pitch_to_white_index(pitch))
-            cv2.line(frame, (x, y - height_px), (x, y - 2), (0, 165, 255), 3, cv2.LINE_AA)
+            bk_x1 = int(round(x - height_px * _sin_bk))
+            bk_y1 = int(round(y - height_px * _cos_bk))
+            bk_x2 = int(round(x - 2 * _sin_bk))
+            bk_y2 = int(round(y - 2 * _cos_bk))
+            cv2.line(frame, (bk_x1, bk_y1), (bk_x2, bk_y2), (0, 165, 255), 3, cv2.LINE_AA)
 
         # Note-name label at every C.
         for pitch in range(lo, hi + 1):
@@ -361,6 +372,9 @@ class Calibration:
     # rows and stored in _h; this enables depth-aware key tracking.
     row_near: list = None
     _h: np.ndarray = field(default=None, repr=False, compare=False)
+    # Rotation of the overlay tick lines from vertical, in degrees (positive = clockwise).
+    # Used for angled camera views where the piano is not shot from directly overhead.
+    rotation_deg: float = 0.0
 
     def __post_init__(self) -> None:
         # Case 1: both rows set (side-angle depth calibration) -> build _h from rows
@@ -452,6 +466,8 @@ class Calibration:
             d["row"] = [float(c) for c in self.row]
         if self.row_near is not None:
             d["row_near"] = [float(c) for c in self.row_near]
+        if self.rotation_deg != 0.0:
+            d["rotation_deg"] = self.rotation_deg
         return d
 
     @staticmethod
@@ -463,6 +479,7 @@ class Calibration:
             k1=d.get("k1", 0.0),
             row=d.get("row"),
             row_near=d.get("row_near"),
+            rotation_deg=d.get("rotation_deg", 0.0),
         )
 
 
@@ -803,6 +820,7 @@ def interactive_calibrate(
     dragging_idx = None  # index into the active points list being mouse-dragged
     mouse_pos = (0, 0)
     octave_offset = 0  # shift entire keyboard overlay up/down by octaves (</>)
+    overlay_rotation = 0.0  # tick rotation in degrees from vertical ([/] keys), for angled cameras
     window = "Calibrate: click white key centers (left to right), specify pitch, press ESC to finish"
 
     def _rebuild_display_frame():
@@ -1021,6 +1039,7 @@ def interactive_calibrate(
                 corners=[[0, 0], [1, 0], [1, 1], [0, 1]],
                 low_pitch=shifted_low, high_pitch=shifted_high,
                 row=row_fit, row_near=row_near_fit,
+                rotation_deg=overlay_rotation,
             )
             draw_keyboard_overlay(disp, preview_calib)
 
@@ -1028,7 +1047,8 @@ def interactive_calibrate(
         auto_hint = " | b: revert to auto" if auto_calib is not None else ""
         mode_hint = " [FRONT-EDGE MODE]" if front_edge_mode else ""
         finish_hint = "ESC: finish" if (points and len(points) >= 4) or (not points and auto_calib is not None) else "ESC: finish (need 4+)"
-        octave_hint = f" | Octave offset: {octave_offset:+d}" if octave_offset != 0 else ""
+        octave_hint = f" | Octave: {octave_offset:+d}" if octave_offset != 0 else ""
+        rot_hint = f" | Rotation: {overlay_rotation:+.0f}°" if overlay_rotation != 0.0 else ""
         hint_segments = [
             f"Click white keys ({len(points)} center, {len(points_near)} front)",
             "f: toggle front-edge",
@@ -1037,8 +1057,9 @@ def interactive_calibrate(
             "Tab: select",
             "Arrows: nudge",
             f"< / >: shift octave{auto_hint}",
+            "[ / ]: rotate overlay",
             f"U: undo",
-            f"{finish_hint}{mode_hint}{octave_hint}",
+            f"{finish_hint}{mode_hint}{octave_hint}{rot_hint}",
         ]
         _draw_wrapped_hint(disp, hint_segments, 20, 40, frame_w - 40)
 
@@ -1084,6 +1105,14 @@ def interactive_calibrate(
             # Shift octave up (> or .) -- only when no manual clicks yet
             octave_offset = min(2, octave_offset + 1)
             continue
+        if key_ascii == ord("["):
+            # Rotate overlay 5° counter-clockwise (tilt left)
+            overlay_rotation = max(-45.0, overlay_rotation - 5.0)
+            continue
+        if key_ascii == ord("]"):
+            # Rotate overlay 5° clockwise (tilt right)
+            overlay_rotation = min(45.0, overlay_rotation + 5.0)
+            continue
         if key_ascii in (255, 8, ord("x"), ord("X")) and selected_idx is not None:
             # Delete / Backspace / x: remove the currently-selected point.
             active = _get_active_points()
@@ -1116,6 +1145,10 @@ def interactive_calibrate(
         # User accepted the pure-auto overlay with no manual clicks --
         # auto_calib's row is already in full-resolution pixel space
         # (detected straight off `reference_frame`), so no rescale needed.
+        # Preserve any rotation the user dialed in with [ / ].
+        if overlay_rotation != 0.0:
+            from dataclasses import replace as _dc_replace
+            return _dc_replace(auto_calib, rotation_deg=overlay_rotation)
         return auto_calib
 
     # `points` and `points_near` live in display-scaled pixel space. Convert back
@@ -1153,5 +1186,6 @@ def interactive_calibrate(
         k1=0.0,
         row=row_final,
         row_near=row_near_final,
+        rotation_deg=overlay_rotation,
     )
     return calib
