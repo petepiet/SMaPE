@@ -259,6 +259,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "clustering (implies --render). Use when clustering produces an implausible hand split (e.g. one "
         "hand gets nearly the whole keyboard) despite reporting high confidence.",
     )
+    p.add_argument(
+        "--batch",
+        nargs="+",
+        metavar="SOURCE",
+        default=None,
+        help="Batch-process one or more SOURCEs -- playlist URL(s), single video URL(s), and/or a path to a "
+        ".txt file of one URL per line -- instead of a single --video. Runs a front-loaded interactive "
+        "phase (calibration, and for --render, hand-colour picking) once per channel, reusing saved results "
+        "for later videos from the same channel, then an unattended --transcribe pass for every video. "
+        "See README 'Batch processing'.",
+    )
     return p
 
 
@@ -463,9 +474,62 @@ def _first_frame(video_path: str):
     return frame
 
 
+def get_trusted_calibration(
+    video_path: str, calib_key: str, low_pitch: int, high_pitch: int, use_cv: bool = True,
+):
+    """Headless counterpart to `_get_or_create_calibration`'s seeding logic --
+    NEVER opens an interactive window (no `select_calibration_frame`/
+    `interactive_calibrate`), for the batch-processing "reuse this channel's
+    saved calibration without bothering the user" path (Phase 1's homogeneity
+    check and Phase 2's unattended run both call this instead).
+
+    Returns the saved `Calibration` for ``calib_key`` if:
+      - nothing is saved -> returns None (nothing to reuse, caller must fall
+        back to an interactive calibration);
+      - ``use_cv`` is False, or a CV read of a representative frame fails ->
+        returns the saved calibration anyway, uncorroborated (this function
+        never judges "is CV available", only "does CV corroborate it" when
+        it IS available -- a cheap, optional extra check, not a requirement);
+      - a CV read succeeds and corroborates the saved one via
+        `calibrations_agree` -> returns the saved calibration;
+      - a CV read succeeds but DISAGREES (camera looks bumped/re-angled) ->
+        returns None, since silently trusting a stale calibration on a
+        camera setup that looks different would produce wrong finger/key
+        mappings with no human in the loop to notice.
+    """
+    from calibration_store import load_saved_calibration, calibrations_agree
+
+    saved = load_saved_calibration(calib_key) if calib_key else None
+    if saved is None:
+        return None
+
+    if not use_cv:
+        return saved
+
+    try:
+        import cv2  # lazy import
+        from keyboard_cv import detect_keyboard_calibration
+
+        cap = cv2.VideoCapture(video_path)
+        ok, frame = cap.read()
+        cap.release()
+        if not ok:
+            return saved  # can't corroborate -- still return the saved one, uncorroborated
+        fresh = detect_keyboard_calibration(frame, low_pitch, high_pitch)
+    except Exception:
+        return saved  # CV read/detection failed -- degrade to uncorroborated reuse, not to None
+
+    if fresh is None:
+        return saved  # low-confidence fresh read -- can't corroborate, but don't discard the saved one
+    if calibrations_agree(saved, fresh, low_pitch, high_pitch):
+        return saved
+    return None  # fresh CV read actively disagrees -- camera looks different, don't silently reuse
+
+
 def _get_or_create_calibration(
     video_path: str, calib_path: str, low_pitch: int, high_pitch: int,
     use_cv_calibration: bool = True, calib_key: str = None,
+    allow_headless_reuse: bool = False,
 ):
     """Interactively (re-)calibrates this video, seeded from whichever of a
     per-source saved calibration (``calib_key``, see calibration_store.py --
@@ -478,9 +542,24 @@ def _get_or_create_calibration(
     calibration updates the store for ``calib_key`` (if given) so the next
     video from this source benefits.
 
+    ``allow_headless_reuse`` (default False -- single-video runs are
+    completely unaffected): when True and `get_trusted_calibration` finds a
+    trusted saved calibration for ``calib_key``, returns it IMMEDIATELY,
+    without ever opening `select_calibration_frame`/`interactive_calibrate`.
+    This is what lets batch processing's Phase 2 stay fully unattended for
+    channels already calibrated in Phase 1.
+
     ``--calibration`` (``calib_path``) is legacy CLI-compatibility cruft --
     calibration is never loaded from/saved to that literal path.
     """
+    if allow_headless_reuse and calib_key:
+        trusted = get_trusted_calibration(
+            video_path, calib_key, low_pitch, high_pitch, use_cv=use_cv_calibration,
+        )
+        if trusted is not None:
+            print(f"  reusing saved calibration for this source (headless): {calib_key}")
+            return trusted
+
     from keyboard import select_calibration_frame, interactive_calibrate
 
     print("Scrub to a good frame, then confirm or click white key centers.")
@@ -1066,6 +1145,7 @@ def analyze(args: argparse.Namespace) -> dict:
                 preview_path, args.calibration, low_pitch, high_pitch,
                 use_cv_calibration=not args.no_cv_calibration,
                 calib_key=calibration_key(args.video, preview_channel_id),
+                allow_headless_reuse=getattr(args, "headless_reuse", False),
             )
 
             # Also do hand-color picking from the (already fully downloaded)
@@ -1189,6 +1269,7 @@ def analyze(args: argparse.Namespace) -> dict:
             video_path, args.calibration, low_pitch, high_pitch,
             use_cv_calibration=not args.no_cv_calibration,
             calib_key=calibration_key(args.video, channel_id),
+            allow_headless_reuse=getattr(args, "headless_reuse", False),
         )
     else:
         # Calibrated early from the preview clip -- low_pitch/high_pitch
@@ -1234,6 +1315,22 @@ def analyze(args: argparse.Namespace) -> dict:
         note_samples = sample_notes(video_path, calib, midi_data.notes)
 
         colors = [note_samples[i].get("onset_rgb") for i in range(len(midi_data.notes))]
+
+        # Batch processing's unattended Phase 2: reuse this channel's saved
+        # colour pick (from Phase 1) instead of opening the interactive
+        # picker -- mirrors _get_or_create_calibration's headless-reuse
+        # path. Only kicks in when nothing has already been picked THIS run
+        # (picked_hand_colors is None) and args.headless_reuse is set (never
+        # true for a plain single-video run -- see build_arg_parser/main()).
+        if getattr(args, "headless_reuse", False) and picked_hand_colors is None:
+            from color_store import color_key, load_saved_colors
+
+            saved_colors = load_saved_colors(color_key(args.video, channel_id))
+            if saved_colors is not None:
+                print("  reusing saved hand colours for this source (headless).")
+                picked_hand_colors = saved_colors
+                args.pick_hand_colors = True  # route through the reference-color branch below
+
         if args.pick_hand_colors and picked_hand_colors:
             # picked_hand_colors was already gathered earlier (right after
             # the full video download, before --transcribe) -- see the
@@ -1564,6 +1661,36 @@ def _log_youtube_run(video: str, out_path: str, transcribed_midi_path: str | Non
         f.write(f"{os.path.basename(out_path)}\n")
 
 
+def _write_analysis_outputs(args: argparse.Namespace) -> None:
+    """Write JSON, .symple bundle, and log.txt for a completed analyze() run.
+
+    Shared by main() (single-video) and batch_process() (per-video) so both
+    paths produce identical output sets.  ``args.out`` must already be set to
+    the desired fingering JSON path before calling.
+    """
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump(args._analysis_result, f, indent=2)
+    print(f"Wrote {args.out}")
+
+    bundle_path = None
+    if not getattr(args, "no_bundle", False):
+        from bundle import write_symple_bundle, default_bundle_path
+
+        bundle_path = default_bundle_path(args.out)
+        try:
+            metadata = {"artist": args.artist, "title": args.title, "genre": args.genre, "difficulty": args.difficulty} if (args.artist or args.title or args.genre or args.difficulty) else None
+            write_symple_bundle(bundle_path, args.midi, args.out, source_video=args.video, metadata=metadata)
+            print(f"Wrote {bundle_path} (MIDI + fingering, for one-step loading in Symplethesia)")
+        except Exception as exc:
+            print(f"  (could not write .symple bundle: {exc})")
+            bundle_path = None
+
+    transcribed_midi_path = None
+    if getattr(args, "transcribe", False):
+        transcribed_midi_path = _strip_fingering_json_suffix(args.out) + ".transcribed.mid"
+    _log_youtube_run(args.video, args.out, transcribed_midi_path, bundle_path)
+
+
 def main(argv=None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -1577,29 +1704,13 @@ def main(argv=None) -> int:
 
         return 0 if selftest.run() else 1
 
-    result = analyze(args)
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
-    print(f"Wrote {args.out}")
+    if args.batch:
+        import batch
 
-    bundle_path = None
-    if not args.no_bundle:
-        from bundle import write_symple_bundle, default_bundle_path
+        return batch.batch_process(args.batch, args)
 
-        bundle_path = default_bundle_path(args.out)
-        try:
-            metadata = {"artist": args.artist, "title": args.title, "genre": args.genre, "difficulty": args.difficulty} if (args.artist or args.title or args.genre or args.difficulty) else None
-            write_symple_bundle(bundle_path, args.midi, args.out, source_video=args.video, metadata=metadata)
-            print(f"Wrote {bundle_path} (MIDI + fingering, for one-step loading in Symplethesia)")
-        except Exception as exc:
-            print(f"  (could not write .symple bundle: {exc})")
-            bundle_path = None
-
-    # Log YouTube runs to log.txt for traceability (which video produced which files).
-    transcribed_midi_path = None
-    if args.transcribe:
-        transcribed_midi_path = _strip_fingering_json_suffix(args.out) + ".transcribed.mid"
-    _log_youtube_run(args.video, args.out, transcribed_midi_path, bundle_path)
+    args._analysis_result = analyze(args)
+    _write_analysis_outputs(args)
 
     return 0
 

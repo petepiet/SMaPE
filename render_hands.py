@@ -12,6 +12,7 @@ real render footage instead).
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Optional, Sequence
 
@@ -181,6 +182,67 @@ def assign_hands_for_notes(colors: Sequence[Sequence[float]], pitches: Sequence[
     # Scaled so the confidence threshold itself sits mid-range.
     confidence = separation / (separation + HUE_SEPARATION_CONFIDENT_THRESHOLD)
     return hands, float(confidence), False
+
+
+# Hue-agreement tolerance for colors_agree() (degrees). Converted internally
+# to a chord-length threshold on the unit hue circle (see that function's
+# docstring for the conversion) -- picked looser than
+# HUE_SEPARATION_CONFIDENT_THRESHOLD's ~29 degrees since this is checking
+# "is it still roughly the same lit-key colour", not "are two hands
+# distinguishable" -- some render-to-render compression/gamma drift is
+# expected even for the identical theme.
+COLORS_AGREE_TOLERANCE_DEG = 25.0
+
+
+def colors_agree(saved: dict, sampled_rgbs: Sequence[Sequence[float]], tolerance_deg: float = COLORS_AGREE_TOLERANCE_DEG) -> bool:
+    """Whether a NEW video's sampled lit-key colours still look like the SAME
+    colour theme as ``saved`` (a per-channel LH/RH reference dict loaded from
+    color_store.py) -- the corroboration check that lets a batch run reuse a
+    saved colour pick instead of re-opening `interactive_pick_hand_colors` for
+    every video from the same channel.
+
+    Deliberately an easier, more robust problem than from-scratch clustering
+    (`cluster_hand_colors`/`assign_hands_for_notes`): rather than discovering
+    two clusters from ``sampled_rgbs`` alone, this matches each sampled colour
+    against two ALREADY-KNOWN target hues (the saved LH_white/RH_white), so a
+    single matching sample for each hand is enough to confirm agreement.
+
+    Keys the check on the WHITE-key references only (LH_white, RH_white) --
+    the black-key variants are often just a darker/tinted derivative of the
+    same hue and, per HAND_COLOR_LABELS' docstring, sometimes missing/assumed
+    entirely; white is the more reliably user-picked, less noisy anchor.
+
+    Hue distance: `_rgb_to_hue_vec` maps each RGB colour to a unit vector
+    [cos(hue), sin(hue)] on the hue circle. Two colours' hue difference
+    (in degrees) relates to the Euclidean (chord) distance between their unit
+    vectors by the standard chord-length identity
+        chord = 2 * sin(delta_degrees / 2 * pi/180)
+    so a `tolerance_deg` angular tolerance becomes a chord-distance threshold
+    via that same formula -- one consistent scheme, computed once here rather
+    than converting each sample's chord distance back to degrees.
+
+    Returns False (cannot confirm agreement) if ``saved`` is missing either
+    LH_white or RH_white, or if ``sampled_rgbs`` is empty -- "not confirmed"
+    is always the safe default; a caller treating that as "re-pick" never
+    silently trusts a stale/incomplete cache entry.
+    """
+    if not sampled_rgbs:
+        return False
+    if "LH_white" not in saved or "RH_white" not in saved:
+        return False
+    if saved["LH_white"] is None or saved["RH_white"] is None:
+        return False
+
+    chord_tolerance = 2.0 * math.sin(math.radians(tolerance_deg) / 2.0)
+
+    sampled_hue_vecs = _rgb_to_hue_vec(list(sampled_rgbs))
+    target_hue_vecs = _rgb_to_hue_vec([saved["LH_white"], saved["RH_white"]])
+
+    for target_vec in target_hue_vecs:
+        distances = np.linalg.norm(sampled_hue_vecs - target_vec, axis=1)
+        if not np.any(distances <= chord_tolerance):
+            return False
+    return True
 
 
 # Reference-color labels for manual hand-color picking (interactive_pick_hand_colors

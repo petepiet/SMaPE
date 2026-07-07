@@ -43,6 +43,11 @@ from calibration_store import (
     load_saved_calibration,
     save_calibration,
 )
+from color_store import (
+    color_key,
+    load_saved_colors,
+    save_colors,
+)
 from render_hands import (
     _rgb_to_hue_vec,
     cluster_hand_colors,
@@ -51,6 +56,7 @@ from render_hands import (
     assign_clusters_to_hands,
     assign_hands_for_notes,
     assign_hands_from_reference_colors,
+    colors_agree,
     lit_delta,
     is_lit,
     lit_end_time,
@@ -78,6 +84,7 @@ from match import (
     group_simultaneous,
     confidence_from_distance,
 )
+from batch import normalize_entries, plan_phase1
 
 
 class TestFailure(Exception):
@@ -442,6 +449,72 @@ def test_calibration_store_round_trip():
         check(loaded.row == calib.row, f"loaded row {loaded.row} != saved row {calib.row}")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_color_store_round_trip():
+    tmp_dir = tempfile.mkdtemp(prefix="piano-fingering-color-test-")
+    try:
+        # Test channel_id-based key
+        key_with_channel = color_key("https://youtu.be/abc", "UCchannel123")
+        check(key_with_channel.startswith("channel-"), f"channel_id key should start with 'channel-', got {key_with_channel}")
+
+        # Test path-based key (when channel_id is None)
+        key_with_path = color_key("https://youtu.be/abc", None)
+        check(key_with_path.startswith("path-"), f"path-based key should start with 'path-', got {key_with_path}")
+
+        # Test round-trip with sample colors
+        sample_colors = {
+            "LH_white": [10, 20, 200],
+            "LH_black": [8, 16, 180],
+            "RH_white": [200, 30, 20],
+            "RH_black": [180, 24, 16]
+        }
+
+        # Initially, nothing should be saved
+        check(load_saved_colors(key_with_channel, base_dir=tmp_dir) is None, "nothing saved yet should load as None")
+
+        # Save and load back
+        save_colors(key_with_channel, sample_colors, base_dir=tmp_dir)
+        loaded = load_saved_colors(key_with_channel, base_dir=tmp_dir)
+        check(loaded is not None, "colors should load back after saving")
+        check(loaded == sample_colors, f"loaded colors {loaded} != saved colors {sample_colors}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_colors_agree_same_theme():
+    saved = {"LH_white": [100, 150, 220], "RH_white": [200, 50, 200]}
+    # Both saved reference colours present among sampled, plus noise colours.
+    sampled = [
+        [102, 148, 218],   # close to LH_white
+        [40, 40, 40],      # noise (near-black, unrelated)
+        [198, 52, 202],    # close to RH_white
+        [10, 200, 10],     # noise (green, unrelated)
+    ]
+    check(colors_agree(saved, sampled) is True, "same theme (both refs present + noise) should agree")
+
+
+def test_colors_agree_different_theme():
+    saved = {"LH_white": [100, 150, 220], "RH_white": [200, 50, 200]}
+    # Totally different hues -- e.g. a yellow/orange theme instead of cyan/magenta.
+    sampled = [[220, 200, 20], [230, 140, 20], [10, 10, 10]]
+    check(colors_agree(saved, sampled) is False, "unrelated hues should not agree")
+
+
+def test_colors_agree_missing_one_hand():
+    saved = {"LH_white": [100, 150, 220], "RH_white": [200, 50, 200]}
+    # Only the LH colour shows up among sampled -- RH is nowhere close.
+    sampled = [[101, 149, 219], [15, 15, 15]]
+    check(colors_agree(saved, sampled) is False, "only one hand's colour present should not agree")
+
+
+def test_colors_agree_empty_inputs():
+    saved = {"LH_white": [100, 150, 220], "RH_white": [200, 50, 200]}
+    check(colors_agree(saved, []) is False, "empty sampled_rgbs should not agree")
+    check(colors_agree({"LH_white": [100, 150, 220]}, [[100, 150, 220], [200, 50, 200]]) is False,
+          "saved missing RH_white should not agree")
+    check(colors_agree({}, [[100, 150, 220], [200, 50, 200]]) is False,
+          "saved missing both refs should not agree")
 
 
 # ---------------------------------------------------------------------------
@@ -1370,6 +1443,78 @@ def test_release_clamps_min_key_duration():
     check(approx(r0.corrected_end_sec, inputs[0].start_sec + 0.03), f"expected the min-key-duration floor to apply, got {r0.corrected_end_sec}")
 
 
+# ---------------------------------------------------------------------------
+# Batch processing (batch.py) pure-logic tests
+# ---------------------------------------------------------------------------
+
+def test_normalize_entries_playlist():
+    # A fake yt-dlp flat-playlist 'entries' list with mixed shapes: one
+    # entry with only 'id' (must build a watch url), one with a full 'url'
+    # and channel info, one missing channel_id/title entirely.
+    fake_entries = [
+        {"id": "abc123", "channel_id": "UCabc", "title": "Song One"},
+        {"url": "https://www.youtube.com/watch?v=def456", "uploader_id": "UCdef", "title": "Song Two"},
+        {"id": "ghi789"},
+    ]
+    normalized = normalize_entries(fake_entries)
+    check(len(normalized) == 3, f"expected 3 normalized entries, got {len(normalized)}")
+
+    check(normalized[0]["url"] == "https://www.youtube.com/watch?v=abc123",
+          f"id-only entry should build a watch url, got {normalized[0]['url']}")
+    check(normalized[0]["channel_id"] == "UCabc", "channel_id should pass through")
+    check(normalized[0]["title"] == "Song One", "title should pass through")
+
+    check(normalized[1]["url"] == "https://www.youtube.com/watch?v=def456", "explicit url should pass through unchanged")
+    check(normalized[1]["channel_id"] == "UCdef", "channel_id should fall back to uploader_id when channel_id absent")
+
+    check(normalized[2]["channel_id"] is None, "missing channel_id should become None")
+    check(normalized[2]["title"] == "", "missing title should become empty string")
+
+
+def test_normalize_entries_single_video():
+    # A single video's own info dict (no 'entries' -- caller already
+    # unwrapped info.get('entries') or [info] before calling this).
+    fake_info = {"id": "xyz999", "channel_id": "UCxyz", "title": "Solo Video"}
+    normalized = normalize_entries([fake_info])
+    check(len(normalized) == 1, f"expected 1 normalized entry, got {len(normalized)}")
+    check(normalized[0]["url"] == "https://www.youtube.com/watch?v=xyz999", "single-video id-only entry should build a watch url")
+    check(normalized[0]["channel_id"] == "UCxyz", "channel_id should pass through for single video")
+
+
+def test_normalize_entries_id_only_builds_url():
+    normalized = normalize_entries([{"id": "onlyid"}])
+    check(len(normalized) == 1, "id-only entry should still normalize")
+    check(normalized[0]["url"] == "https://www.youtube.com/watch?v=onlyid", f"unexpected built url: {normalized[0]['url']}")
+    check(normalized[0]["channel_id"] is None, "no channel info available should be None")
+    check(normalized[0]["title"] == "", "no title available should be empty string")
+
+
+def test_plan_phase1_channel_reuse():
+    # Two videos from the SAME channel; nothing saved anywhere initially.
+    sources = [
+        {"url": "https://youtu.be/v1", "channel_key": "channel-UCsame", "title": "First"},
+        {"url": "https://youtu.be/v2", "channel_key": "channel-UCsame", "title": "Second"},
+    ]
+    plan = plan_phase1(sources, has_saved_calib=lambda k: False, has_saved_colors=lambda k: False, needs_colors=False)
+    check(len(plan["manual"]) == 1, f"expected exactly 1 manual entry, got {len(plan['manual'])}")
+    check(plan["manual"][0]["url"] == "https://youtu.be/v1", "first video of the channel should be manual")
+    check(len(plan["reuse"]) == 1, f"expected exactly 1 reuse entry, got {len(plan['reuse'])}")
+    check(plan["reuse"][0]["url"] == "https://youtu.be/v2", "second video of the same channel should reuse")
+    check(isinstance(plan["report"], str) and len(plan["report"]) > 0, "report should be a non-empty summary string")
+    check("1 of 2" not in plan["report"] or "manual" in plan["report"], f"report should mention manual setup: {plan['report']}")
+
+
+def test_plan_phase1_all_saved():
+    sources = [
+        {"url": "https://youtu.be/v1", "channel_key": "channel-UCsaved", "title": "First"},
+        {"url": "https://youtu.be/v2", "channel_key": "channel-UCsaved", "title": "Second"},
+        {"url": "https://youtu.be/v3", "channel_key": "channel-UCother", "title": "Third"},
+    ]
+    plan = plan_phase1(sources, has_saved_calib=lambda k: True, has_saved_colors=lambda k: True, needs_colors=True)
+    check(len(plan["manual"]) == 0, f"expected no manual entries when everything is already saved, got {len(plan['manual'])}")
+    check(len(plan["reuse"]) == 3, f"expected all 3 entries to reuse, got {len(plan['reuse'])}")
+
+
 TESTS = [
     test_white_index_roundtrip,
     test_homography_known_corners_to_expected_pitches,
@@ -1391,6 +1536,11 @@ TESTS = [
     test_calibrations_agree_large_shift_disagrees,
     test_calibrations_agree_ignores_row_height_difference,
     test_calibration_store_round_trip,
+    test_color_store_round_trip,
+    test_colors_agree_same_theme,
+    test_colors_agree_different_theme,
+    test_colors_agree_missing_one_hand,
+    test_colors_agree_empty_inputs,
     test_cluster_hand_colors_two_clear_clusters,
     test_cluster_hand_colors_single_cluster_low_separation,
     test_cluster_hand_colors_degenerate_inputs,
@@ -1452,6 +1602,11 @@ TESTS = [
     test_release_fast_passage_no_overlap,
     test_release_chord_independent_fingers,
     test_release_clamps_min_key_duration,
+    test_normalize_entries_playlist,
+    test_normalize_entries_single_video,
+    test_normalize_entries_id_only_builds_url,
+    test_plan_phase1_channel_reuse,
+    test_plan_phase1_all_saved,
 ]
 
 

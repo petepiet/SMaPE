@@ -388,6 +388,54 @@ they often don't start at the same silence-trimmed point) will show you
 concretely how many notes disagree and whether a given threshold change
 actually helped, rather than guessing.
 
+## Batch processing (`--batch`)
+
+Process a whole YouTube playlist (or several loose video URLs) in one
+command, targeting `--transcribe` mode:
+
+```bash
+python3 extract_fingering.py --batch "https://youtube.com/playlist?list=..." --transcribe
+python3 extract_fingering.py --batch video1_url video2_url urls.txt --transcribe --render
+```
+
+`--batch` accepts one or more SOURCEs: playlist URLs, single video URLs, or
+a path to a `.txt` file with one URL per line -- any mix, in any order. Runs
+in two phases:
+
+- **Phase 1 (interactive, front-loaded):** for each video, resolves its
+  channel's calibration/colour storage key (same per-channel cache as a
+  normal single-video run -- see "Calibration" above and `--render`'s
+  colour picking below) and prints a **homogeneity report**: how many
+  videos already have saved calibration/colours for their channel and can
+  be reused, versus how many need a manual pick. Only the *first* video of
+  each not-yet-saved channel opens an interactive calibration window (and,
+  in `--render` mode, the hand-colour picker); every later video from that
+  same channel reuses what was just saved, headlessly.
+- **Phase 2 (unattended):** transcribes and analyzes every video in the
+  batch back-to-back, with `--no-align` and the saved per-channel
+  calibration/colours applied automatically -- no windows, no prompts. One
+  video failing (bad download, transcription error, etc.) is caught and
+  logged rather than aborting the rest of the batch.
+
+The batch always ends with a summary (`batch done: X ok, Y failed, Z
+skipped`) and a list of any failures.
+
+**Why `--transcribe` only, for now:** batch mode assumes `--no-align` is
+safe, which is only true when the offset is 0 by construction (see
+"Transcription" above) -- a user-supplied `--midi` per video would need its
+own offset estimated or supplied per video, which is a later extension.
+
+**Consistency checks keep "set up once per channel" safe**, so a batch
+never silently reuses the wrong camera angle or colour theme:
+- camera angle: the existing headless `calibrations_agree` check (a fresh
+  CV read of the new video must still line up with the saved calibration);
+- hand colours (`--render` only): `colors_agree` (in `render_hands.py`)
+  matches a few sampled lit-key colours from the new video against the
+  saved LH/RH white-key references by hue distance (25° tolerance) --
+  deliberately an easier, more robust check than clustering from scratch,
+  since it's matching against two already-known target colours rather than
+  discovering new ones.
+
 ## Matching
 
 For each MIDI note onset:
