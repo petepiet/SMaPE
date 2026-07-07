@@ -576,7 +576,6 @@ class FingeringGUI:
         ttk.Checkbutton(
             page, text="Process multiple videos (batch mode)",
             variable=self.batch_mode_var, command=self._on_batch_toggled,
-            style="Tooltip.TCheckbutton",
         ).pack(anchor="w", pady=(10, 0))
 
         # Batch queue panel (hidden by default, revealed by _on_batch_toggled)

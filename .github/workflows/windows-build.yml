@@ -54,7 +54,7 @@ jobs:
           New-Item -ItemType Directory -Force bundle | Out-Null
           Copy-Item -Recurse dist\SMaPE\* bundle\
           New-Item -ItemType Directory -Force bundle\app | Out-Null
-          Copy-Item *.py, smape.png, DISCLAIMER.txt, requirements.txt bundle\app\
+          Copy-Item *.py, smape.png, icon.png, DISCLAIMER.txt, requirements.txt bundle\app\
           Copy-Item -Recurse buttons bundle\app\buttons
           # Pre-bundle the hand-landmark model so first run works offline
           New-Item -ItemType Directory -Force bundle\app\models | Out-Null
