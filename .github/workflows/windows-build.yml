@@ -44,8 +44,8 @@ jobs:
         shell: pwsh
         run: |
           pip install pyinstaller pillow tkinterdnd2
-          # .ico for the exe, converted from the project logo
-          python -c "from PIL import Image; Image.open('smape.png').save('smape.ico', sizes=[(16,16),(32,32),(48,48),(256,256)])"
+          # .ico for the exe, converted from the project icon
+          python -c "from PIL import Image; Image.open('icon.png').save('smape.ico', sizes=[(16,16),(32,32),(48,48),(256,256)])"
           pyinstaller --noconfirm --windowed --name SMaPE --icon smape.ico gui.py
 
       - name: Assemble bundle layout
@@ -140,7 +140,7 @@ jobs:
         run: |
           mkdir -p pkg/opt/smape/app/models
           cp -r dist/SMaPE/. pkg/opt/smape/
-          cp *.py smape.png DISCLAIMER.txt requirements.txt pkg/opt/smape/app/
+          cp *.py smape.png icon.png DISCLAIMER.txt requirements.txt pkg/opt/smape/app/
           cp -r buttons pkg/opt/smape/app/buttons
           curl -fsSL -o pkg/opt/smape/app/models/hand_landmarker.task "$HAND_MODEL_URL"
 
@@ -180,7 +180,7 @@ jobs:
            Symplethesia.
           EOF
           ln -s /opt/smape/SMaPE pkg/usr/bin/smape
-          cp smape.png pkg/usr/share/pixmaps/smape.png
+          cp icon.png pkg/usr/share/pixmaps/smape.png
           cat > pkg/usr/share/applications/smape.desktop <<EOF
           [Desktop Entry]
           Type=Application

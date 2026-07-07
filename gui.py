@@ -96,7 +96,7 @@ POPEN_KWARGS = (
 )
 DOWNLOADS_DIR = os.path.expanduser("~/Downloads")
 APP_TITLE = "Symple Midi and Playstyle Extractor (SMaPE)"
-ICON_PATH = HERE.parent.parent / "src-tauri" / "icons" / "32x32.png"
+ICON_PATH = HERE / "icon.png"
 LOGO_PATH = HERE / "smape.png"
 
 # --- Symplethesia palette (ported from src/style.css :root) --------------
