@@ -1001,6 +1001,11 @@ class FingeringGUI:
             parts = title.split(" by ", 1)
             song_title = parts[0].strip()
             artist = parts[1].strip()
+        elif ": " in title:
+            # "Artist: Song Title" pattern common on YouTube
+            parts = title.split(": ", 1)
+            artist = parts[0].strip()
+            song_title = parts[1].strip()
         else:
             song_title = title
 
@@ -1023,7 +1028,7 @@ class FingeringGUI:
                 break  # Use the first match
 
         # Clean up common keywords from song title
-        for keyword in [" EASY Piano", " HARD Piano", " Piano Cover", " Piano Tutorial", " Easy Piano", " Piano", " Tutorial", " Cover", " (Easy)", " (Hard)", " (Advanced)", " (Expert)", " - Easy", " - Hard", " - Advanced", " - Expert"]:
+        for keyword in [" EASY Piano", " HARD Piano", " (Piano Cover)", " Piano Cover", " Piano Tutorial", " Easy Piano", " Piano", " Tutorial", " (Cover)", " Cover", " (Easy)", " (Hard)", " (Advanced)", " (Expert)", " - Easy", " - Hard", " - Advanced", " - Expert"]:
             song_title = song_title.replace(keyword, "").replace(keyword.lower(), "").strip()
 
         # Set genre as "Piano" by default
@@ -1805,8 +1810,10 @@ class FingeringGUI:
                             p = s[len("Wrote "):].strip()
                             if os.path.exists(p):
                                 self._last_run_json = p
-                        elif s.startswith("Wrote ") and ".symple " in s:
-                            p = s[len("Wrote "):].split(" ")[0].strip()
+                        elif s.startswith("Wrote ") and ".symple" in s:
+                            tail = s[len("Wrote "):].strip()
+                            idx = tail.find(".symple")
+                            p = tail[:idx + len(".symple")] if idx >= 0 else ""
                             if p.endswith(".symple") and os.path.exists(p):
                                 self._last_run_bundle = p
                     # Extract video title from a yt-dlp download log line. Two

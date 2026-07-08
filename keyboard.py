@@ -760,7 +760,7 @@ def interactive_calibrate(
       - otherwise, when ``use_cv_calibration`` (default on), this function
         runs the CV black-key detector (keyboard_cv.detect_keyboard_
         calibration) itself on the reference frame.
-    Clicking C/G keys always overrides either seed: once >=3 points are
+    Clicking A/C/G keys always overrides either seed: once >=3 points are
     placed, the row is refit from those clicks instead, exactly as in
     pure-manual mode. Pressing 'b' clears any clicks and reverts to the
     seed overlay. No seed (failed/low-confidence detection, or none given)
@@ -779,7 +779,7 @@ def interactive_calibrate(
             auto_calib = detect_keyboard_calibration(reference_frame, low_pitch, high_pitch)
         except Exception:
             auto_calib = None
-        print("CV auto-calibration found a confident keyboard fit -- ESC to accept, or click C/G keys to override."
+        print("CV auto-calibration found a confident keyboard fit -- ESC to accept, or click A/C/G keys to override."
               if auto_calib is not None else
               "CV auto-calibration didn't find a confident keyboard fit -- click white key centers manually.")
 
@@ -899,20 +899,36 @@ def interactive_calibrate(
                 dragging_idx = None
 
     def _open_key_picker(click_x: float, click_y: float):
-        """Pop up a small Tkinter window with white-key buttons (C0..C8, plus
-        the in-between white keys) so the user can specify exactly which key
-        they meant to click. Cancel (closing the window) discards the click."""
+        """Pop up A / C / G buttons; octave is inferred from click position."""
         nonlocal selected_idx
         import tkinter as tk
         from tkinter import ttk
+
+        # Estimate which octave the click landed in by interpolating click_x
+        # against the known keyboard x-span.
+        frac = max(0.0, min(1.0, click_x / max(frame_w - 1, 1)))
+        est_wi = lo_wi + frac * (hi_wi - lo_wi)
+
+        # Pitch class offsets within an octave (C=0, G=7, A=9)
+        PC = {"C": 0, "G": 7, "A": 9}
+
+        def _nearest_pitch(pc_name: str) -> int:
+            """MIDI pitch for pitch class nearest to est_wi within the keyboard range."""
+            pc = PC[pc_name]
+            best, best_d = low_pitch, float("inf")
+            for p in range(low_pitch, high_pitch + 1):
+                if p % 12 == pc:
+                    d = abs(pitch_to_white_index(p) - est_wi)
+                    if d < best_d:
+                        best_d, best = d, p
+            return best
 
         root = tk.Tk()
         root.withdraw()
         picker = tk.Toplevel(root)
         picker.title("Select key")
 
-        # Compact fixed size -- just two rows of C/G buttons
-        picker_w, picker_h = 480, 160
+        picker_w, picker_h = 200, 80
         picker.update_idletasks()
         screen_w = picker.winfo_screenwidth()
         screen_h = picker.winfo_screenheight()
@@ -921,36 +937,25 @@ def interactive_calibrate(
         picker.geometry(f"{picker_w}x{picker_h}+{x}+{y}")
 
         style = ttk.Style(picker)
-        style.configure("Key.TButton", font=("Arial", 12))
+        style.configure("Key.TButton", font=("Arial", 14))
 
         result = {"pitch": None}
 
-        def on_select(pitch: int):
-            result["pitch"] = pitch
+        def on_select(pc_name: str):
+            result["pitch"] = _nearest_pitch(pc_name)
             picker.destroy()
 
         frame = ttk.Frame(picker)
         frame.pack(padx=10, pady=10, fill="both", expand=True)
-        # Only C and G notes, spanning the full keyboard (pitch 12 = C0
-        # through pitch 108 = C8) -- enough to reference any key while
-        # keeping the picker uncluttered.
-        pitches = [12, 19, 24, 31, 36, 43, 48, 55, 60, 67, 72, 79, 84, 91, 96, 103, 108]
         row = ttk.Frame(frame)
         row.pack(fill="x")
-        for i, pitch in enumerate(pitches):
-            note_name = pitch_to_note_name(pitch)
-            if i > 0 and note_name.startswith("C"):
-                row = ttk.Frame(frame)
-                row.pack(fill="x")
+        for name in ["A", "C", "G"]:
             ttk.Button(
-                row, text=note_name, width=4, command=lambda p=pitch: on_select(p),
+                row, text=name, width=4, command=lambda n=name: on_select(n),
                 style="Key.TButton",
-            ).pack(side="left", padx=2, pady=2)
+            ).pack(side="left", padx=4, pady=2)
 
-        def on_close():
-            picker.destroy()
-
-        picker.protocol("WM_DELETE_WINDOW", on_close)
+        picker.protocol("WM_DELETE_WINDOW", picker.destroy)
         picker.wait_window()
         root.destroy()
 
