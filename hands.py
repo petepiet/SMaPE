@@ -126,6 +126,93 @@ def _ensure_model_downloaded(model_path) -> None:
         ) from exc
 
 
+def _keyboard_crop_box(calib, frame_h: int, frame_w: int):
+    """Return (y1, y2, x1, x2) covering the keyboard band plus hand headroom.
+
+    MediaPipe internally downscales its input to ~192 px; hands in a full
+    piano-video frame are tiny and routinely missed. Cropping to just the
+    keyboard region + margin makes the hands 3-4× larger to the detector,
+    dramatically improving detection rate especially at the start of the
+    video and during octave jumps where the hand briefly leaves the centre.
+    Falls back to the full frame if no row-map calibration is available.
+    """
+    try:
+        from keyboard import _row_project  # noqa: PLC0415
+    except ImportError:
+        return 0, frame_h, 0, frame_w
+
+    if calib is None or calib.row is None:
+        return 0, frame_h, 0, frame_w
+
+    ys = [_row_project(calib.row, u)[1] for u in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    if calib.row_near is not None:
+        ys += [_row_project(calib.row_near, u)[1] for u in (0.0, 0.25, 0.5, 0.75, 1.0)]
+
+    key_y_min = min(ys)
+    key_y_max = max(ys)
+
+    # Hands play above the keyboard (smaller y in image coords when keyboard
+    # is in the lower half of the frame). Give 40 % of frame height as
+    # headroom above and a small margin below.
+    margin_above = min(int(frame_h * 0.40), 400)
+    margin_below = min(int(frame_h * 0.10), 80)
+
+    y1 = max(0, int(key_y_min) - margin_above)
+    y2 = min(frame_h, int(key_y_max) + margin_below)
+    return y1, y2, 0, frame_w
+
+
+def fix_handedness_continuity(frames):
+    """Post-processing pass that fixes isolated L/R label swaps in two steps.
+
+    1. Geometric swap: if both hands are detected and L wrist is to the right
+       of R wrist, the labels are geometrically impossible — swap them.
+    2. Temporal vote: a single-hand frame whose label disagrees with both of
+       its neighbours (within a ±3-frame window) is likely a spurious flip;
+       relabel it to match the majority.
+
+    Piano hands essentially never cross, so these rules are very low-risk.
+    """
+    def _hand_x(obs):
+        if obs.wrist is not None:
+            return obs.wrist[0]
+        return obs.fingertips[0].x if obs.fingertips else 0.0
+
+    n = len(frames)
+
+    # Rule 1 — geometric consistency in two-hand frames
+    for frame in frames:
+        if len(frame.hands) != 2:
+            continue
+        by_label = {obs.hand: obs for obs in frame.hands}
+        obs_l = by_label.get('L')
+        obs_r = by_label.get('R')
+        if obs_l and obs_r and _hand_x(obs_l) > _hand_x(obs_r):
+            obs_l.hand, obs_r.hand = 'R', 'L'
+
+    # Rule 2 — temporal vote for isolated single-hand mislabels
+    for i in range(n):
+        frame = frames[i]
+        if len(frame.hands) != 1:
+            continue
+        obs = frame.hands[0]
+        ox = _hand_x(obs)
+        same = flip = 0
+        for j in range(max(0, i - 3), min(n, i + 4)):
+            if j == i:
+                continue
+            for other in frames[j].hands:
+                if abs(_hand_x(other) - ox) < 100:   # within 100 px → same hand
+                    if other.hand == obs.hand:
+                        same += 1
+                    else:
+                        flip += 1
+        if flip > same * 2:                            # overwhelming counter-evidence
+            obs.hand = 'R' if obs.hand == 'L' else 'L'
+
+    return frames
+
+
 def extract_fingertip_frames(
     video_path: str,
     fps: float = 30.0,
@@ -133,6 +220,7 @@ def extract_fingertip_frames(
     flip_handedness: bool = False,
     k1: float = 0.0,
     min_hand_confidence: float = 0.5,
+    calib=None,
 ):
     """Runs MediaPipe's HandLandmarker (Tasks API) over the video and
     returns a list of `FingertipFrame`, one per sampled frame at the
@@ -140,15 +228,16 @@ def extract_fingertip_frames(
 
     `min_hand_confidence` sets both `min_hand_detection_confidence` and
     `min_hand_presence_confidence` (the library default for both is 0.5).
-    Lower this if the preview/output shows one hand frequently missing
-    entirely even though it's clearly visible and playing -- a real,
-    observed failure mode on at least one monochrome/black-and-white source
-    video (MediaPipe's hand detector was trained mostly on color imagery and
-    partly relies on skin-tone cues, which desaturated footage lacks). This
-    trades a higher false-detection rate for fewer missed real hands; 0.3 is
-    a reasonable first thing to try. `min_tracking_confidence` is left at
-    the library default -- this is about a hand not being detected AT ALL,
-    not about noisy tracking of an already-detected hand.
+    Lower this if the preview/output shows a hand frequently missing
+    entirely while clearly visible -- 0.3 is a reasonable first try.
+
+    `calib` (optional Calibration): when provided, each frame is cropped to
+    the keyboard band + hand headroom before MediaPipe sees it.  MediaPipe
+    internally downscales input to ~192 px; in a full piano-video frame the
+    hands are tiny.  The crop makes them 3-4× larger to the detector,
+    fixing most "hands not recognised at the start / after octave jumps"
+    failures.  Landmark coordinates are mapped back to full-frame pixels
+    automatically so the rest of the pipeline is unaffected.
 
     Lazy-imports cv2 and mediapipe. Not used by selftest.py.
     """
@@ -177,6 +266,15 @@ def extract_fingertip_frames(
     src_fps = cap.get(cv2.CAP_PROP_FPS) or fps
     frame_stride = max(1, round(src_fps / fps))
 
+    # Compute keyboard crop box once from the video's declared dimensions.
+    # undistort_frame preserves the frame size, so these stay valid throughout.
+    orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    crop_y1, crop_y2, crop_x1, crop_x2 = _keyboard_crop_box(calib, orig_h, orig_w)
+    crop_h = crop_y2 - crop_y1
+    crop_w = crop_x2 - crop_x1
+    using_crop = (crop_y1 > 0 or crop_y2 < orig_h or crop_x1 > 0 or crop_x2 < orig_w)
+
     frames: list = []
     with _suppress_native_stderr():
         landmarker_ctx = HandLandmarker.create_from_options(options)
@@ -190,7 +288,6 @@ def extract_fingertip_frames(
             if k1 != 0.0:
                 frame = undistort_frame(frame, k1)
             if idx % frame_stride == 0:
-                h, w = frame.shape[:2]
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 time_sec = idx / src_fps
                 timestamp_ms = int(round(time_sec * 1000))
@@ -198,7 +295,8 @@ def extract_fingertip_frames(
                     timestamp_ms = last_timestamp_ms + 1
                 last_timestamp_ms = timestamp_ms
 
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                mp_input = rgb[crop_y1:crop_y2, crop_x1:crop_x2] if using_crop else rgb
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=mp_input)
                 result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
                 observations: list = []
@@ -212,16 +310,19 @@ def extract_fingertip_frames(
                         hand_code = "L" if label == "Left" else "R"
                         if flip_handedness:
                             hand_code = "R" if hand_code == "L" else "L"
+                        # Landmarks are normalised (0-1) relative to the crop;
+                        # map them back to full-frame pixel coordinates.
+                        def _px(lm, cw=crop_w, ch=crop_h, cx=crop_x1, cy=crop_y1):
+                            return cx + lm.x * cw, cy + lm.y * ch
                         tips = []
                         for finger, lm_idx in FINGERTIP_LANDMARKS.items():
-                            lm = landmarks[lm_idx]
-                            tips.append(Fingertip(finger=finger, x=lm.x * w, y=lm.y * h))
-                        wlm = landmarks[WRIST_LANDMARK]
-                        wrist = (wlm.x * w, wlm.y * h)
+                            ax, ay = _px(landmarks[lm_idx])
+                            tips.append(Fingertip(finger=finger, x=ax, y=ay))
+                        wrist = _px(landmarks[WRIST_LANDMARK])
                         plms = [landmarks[i] for i in PALM_LANDMARKS]
                         palm = (
-                            sum(p.x * w for p in plms) / len(plms),
-                            sum(p.y * h for p in plms) / len(plms),
+                            crop_x1 + sum(p.x * crop_w for p in plms) / len(plms),
+                            crop_y1 + sum(p.y * crop_h for p in plms) / len(plms),
                         )
                         observations.append(HandObservation(
                             hand=hand_code, fingertips=tips, wrist=wrist, palm=palm,

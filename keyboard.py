@@ -272,16 +272,17 @@ def _calib_u_to_screen(calib, u: float):
     return float(pt[0]), float(pt[1])
 
 
-def draw_keyboard_overlay(frame, calib, highlight_pitch=None, height_px: int = 22) -> None:
+def draw_keyboard_overlay(frame, calib, highlight_pitch=None, ghost_pitch=None, height_px: int = 22) -> None:
     """Draw the inferred piano keyboard over ``frame`` (a cv2 BGR image,
     mutated in place): white-key separator ticks, black-key marks, and a note
     label at every C, all positioned by the calibration. Lets the mapping be
     visually verified against the real keys -- in the exported preview video
     and live while calibrating (so points can be dragged until it lines up).
 
-    ``highlight_pitch`` (optional) is drawn as a red ring on its key (used in
-    the preview to show the currently-sounding note). Any projection failure
-    is swallowed so overlay drawing never crashes the caller."""
+    ``highlight_pitch`` draws a red ring (a hand was detected near this key).
+    ``ghost_pitch`` draws a grey ring (MIDI says this note is sounding but no
+    hand was detected nearby — ghost note or tracking dropout). Any projection
+    failure is swallowed so overlay drawing never crashes the caller."""
     import cv2  # lazy import
 
     try:
@@ -346,6 +347,9 @@ def draw_keyboard_overlay(frame, calib, highlight_pitch=None, height_px: int = 2
         if highlight_pitch is not None:
             x, y = wi_to_screen(pitch_to_white_index(highlight_pitch))
             cv2.circle(frame, (x, y), 12, (0, 0, 255), 3, cv2.LINE_AA)
+        if ghost_pitch is not None:
+            x, y = wi_to_screen(pitch_to_white_index(ghost_pitch))
+            cv2.circle(frame, (x, y), 12, (160, 160, 160), 2, cv2.LINE_AA)
     except Exception:
         pass
 

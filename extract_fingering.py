@@ -713,9 +713,24 @@ def run_preview(video_path: str, calib, midi_data, offset_sec: float, fingertip_
         if note_video_times and abs(note_video_times[ni][0] - t) < 0.15:
             current_pitch = note_video_times[ni][1]
 
-        # Inferred keyboard overlay (verifies calibration against the real
-        # keys); the currently-sounding note is ringed in red.
-        draw_keyboard_overlay(frame, calib, highlight_pitch=current_pitch)
+        # Inferred keyboard overlay.  Red ring = MIDI note + hand nearby
+        # (confirms tracking).  Grey ring = MIDI note with no hand detected
+        # nearby (ghost note from transcription or tracking dropout).
+        tips_at_t = interpolate_fingertips(fingertip_frames, t)
+        hand_near = False
+        if current_pitch is not None and tips_at_t:
+            from keyboard import pitch_to_white_index as _p2wi
+            exp_wi = _p2wi(current_pitch)
+            for _h, _f, tx, ty in tips_at_t:
+                key_x = calib.screen_to_white_index((tx, ty))
+                if abs(key_x - exp_wi) < 3.0:
+                    hand_near = True
+                    break
+        draw_keyboard_overlay(
+            frame, calib,
+            highlight_pitch=current_pitch if hand_near else None,
+            ghost_pitch=current_pitch if (current_pitch is not None and not hand_near) else None,
+        )
 
         for hand, finger, x, y in interpolate_fingertips(fingertip_frames, t):
             color = (255, 0, 0) if hand == "L" else (0, 255, 0)
@@ -1034,6 +1049,13 @@ def _auto_correct_calibration_octave(calib, midi_notes, calib_key):
     Returns the (possibly corrected) calibration.
     """
     if not midi_notes or len(midi_notes) < 10:
+        return calib
+
+    # If the user clicked A/C/G keys during calibration, the row map encodes
+    # actual pitches directly — the octave is already ground-truth. Only
+    # auto-correct corner-based calibrations (row=None) where low_pitch /
+    # high_pitch came from CLI args without per-key visual confirmation.
+    if calib.row is not None:
         return calib
 
     import numpy as np
@@ -1516,8 +1538,10 @@ def analyze(args: argparse.Namespace) -> dict:
         print(f"Tracking hands in video at {args.fps} fps (this may take a while)...")
         fingertip_frames = extract_fingertip_frames(
             video_path, fps=args.fps, flip_handedness=args.flip_handedness, k1=calib.k1,
-            min_hand_confidence=args.min_hand_confidence,
+            min_hand_confidence=args.min_hand_confidence, calib=calib,
         )
+        from hands import fix_handedness_continuity
+        fix_handedness_continuity(fingertip_frames)
         print(f"  {len(fingertip_frames)} sampled frames")
 
         # Diagnostic: predicts no-finger-support risk before the (much slower)
