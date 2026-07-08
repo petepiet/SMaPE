@@ -1,45 +1,51 @@
 # SMaPE — Symple Midi and Playstyle Extractor
 
-**Detect piano finger positions from videos.** Given a performance video (hands on keyboard, static camera) and the corresponding MIDI, SMaPE figures out which hand and finger played each note. Ships results in a `.symple` bundle for seamless import into [Symplethesia](https://app.symplethesia.com).
+**Turn a piano performance video into a playable, hand-split score.** Point SMaPE at a video of someone playing piano and it works out **which hand plays each note** (and often which finger), then packages everything into a `.symple` bundle you open in one click in [Symplethesia](https://app.symplethesia.com) — ready to practise hands separately.
+
+No MIDI file required: SMaPE can transcribe the notes straight from the video's own audio.
 
 <div style="background: #0a0d14; padding: 20px; border-radius: 8px; display: inline-block;">
   <img src="smape.png" alt="SMaPE Tool" width="500">
 </div>
 
-## Features
+## Get started — just run the app
 
-- **Finger position detection:** Detects hand/finger for each MIDI note via hand tracking (MediaPipe)
-- **Video transcription:** No MIDI file? Generate one from audio using Kong high-res piano transcription model
-- **Synthesia support:** Handles rendered keyboard videos with hand colors instead of real hands
-- **Metadata & bundles:** Auto-fill song metadata (Artist, Title, Genre, Difficulty) and export as shareable `.symple` bundles
-- **Interactive calibration:** Click a few keys (C/G) to calibrate the keyboard; accuracy improves with more points
-- **Sync alignment:** See/hear the alignment with MIDI playback before committing to the slow hand-tracking phase
-- **Desktop GUI:** Tkinter-based interface; no dependencies beyond Python stdlib for launching
-- **Extensible output:** MIDI + finger position data bundled together for one-step import into Symplethesia
+**You don't need Python or the command line.** Grab the ready-to-run app from the [latest release](https://github.com/petepiet/SMaPE/releases/latest):
 
-## Quick Start
+- **Windows** — download **`SMaPE-windows-x64.zip`**, unzip it anywhere, and double-click **`SMaPE.exe`**. Nothing to install.
+- **Linux** — download **`SMaPE-linux-amd64.deb`** and install it (double-click, or `sudo apt install ./SMaPE-linux-amd64.deb`). Launch **SMaPE** from your apps menu.
 
-```bash
-# Install dependencies (venv required on Debian/Ubuntu — see "Install" section)
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+Then it's a short wizard:
 
-# Run the GUI
-python3 gui.py
-```
+1. **Add a video** — paste a YouTube (or any yt-dlp) link, or drop in a local file.
+2. **Say what it is** — a real piano player, a Synthesia-style training video, or "just extract the MIDI".
+3. **Run** — SMaPE downloads the video, transcribes the MIDI if you don't have one, opens a quick calibration window (click a few C/G keys so it knows where the keyboard is), and analyses the hands.
 
-Or, command-line mode:
+While it runs, a **live view** shows the hand tracking frame-by-frame and a **yellow box marks exactly the area being analysed**, so you can see at a glance that it's working. When it finishes you get a `.symple` bundle — open it in Symplethesia and start playing.
 
-```bash
-python3 extract_fingering.py --video performance.mp4 --midi performance.mid --out fingering.json
-```
+> 💡 **Trying it out?** Use **public-domain / royalty-free music** so you can freely share the results — e.g. a Chopin prelude, Debussy's *Arabesque No. 1*, or a Bach invention. Classical piano is public domain and plentiful on YouTube.
 
-The video is only used to answer "which finger is on the key at each known
-onset" -- the MIDI already gives exact pitch and timing. This is **not**
-blind audio/video transcription... unless you pass `--transcribe`, which
-generates the MIDI from the video's own audio using a piano-specific AMT
-(automatic music transcription) model. See ["Transcription"](#transcription---transcribe) below.
+## What's new in v1.0.0
+
+v1.0.0 is a big step up in **hand-assignment accuracy** — getting the left/right split right, which is what makes hands-separate practice actually work.
+
+- **Fixed the #1 tracking failure.** Overhead camera shots (where the hands sit *below* the keys) used to lose the hands entirely because the analysed area clipped the palms. It now includes the whole hand — on a real test video, both-hands detection jumped from **0% → 88%**.
+- **Much smarter left/right assignment.** Several cooperating signals now decide which hand played each note — musical register, a bass/melody "voice" model learned from the clearly-tracked passages, and targeted re-detection where a hand was missed — so far fewer notes bleed onto the wrong hand.
+- **Skin-blob hand recovery** (optional checkbox). For ballads where both hands play close together and get merged into one, an independent skin-colour tracker finds the two hands and splits them apart.
+- **Contrast boost** for dark or low-contrast footage.
+- **Clearer previews.** Every sounding note is drawn on the keyboard **coloured by its assigned hand**, and the live/preview view shows the analysed region — so you can eyeball the result instead of guessing.
+
+Everything above is **on by default** (skin-blob recovery is a single optional checkbox) — you don't have to configure anything.
+
+## What it does
+
+- **Which hand plays what:** the core output — a reliable left/right split for hands-separate practice — via video hand tracking (MediaPipe) plus the multi-signal assignment above.
+- **Finger numbers too:** where the video is clear, each note also gets a finger (1–5).
+- **No MIDI? No problem:** transcribes the notes from the video's audio with the Kong high-resolution piano model.
+- **Synthesia videos:** also handles rendered keyboard videos with colour-coded keys instead of real hands.
+- **One-click sharing:** exports a `.symple` bundle (MIDI + hand/finger data + song metadata) that opens directly in Symplethesia.
+
+Prefer the command line, or want the full flag reference? Everything the app does is also available via `extract_fingering.py` — see [Command-line use](#command-line-use-optional) further down.
 
 ## Windows: portable app (no install)
 
@@ -145,11 +151,15 @@ python3 selftest.py
 python3 extract_fingering.py --selftest
 ```
 
-## Usage
+## Command-line use (optional)
+
+> The app (above) is the recommended way to use SMaPE and needs none of this.
+> The CLI is here for automation, batch jobs, and people who prefer a terminal.
+> It first needs the Python dependencies installed — see [Install](#install).
 
 ```bash
 python3 extract_fingering.py \
-  --video performance.mp4 --midi performance.mid \
+  --video chopin-prelude.mp4 --midi chopin-prelude.mid \
   --out fingering.json
 ```
 
@@ -188,8 +198,17 @@ Full CLI:
 --min-hand-confidence F   MediaPipe hand-detection confidence threshold, 0..1 (default 0.3; lower, e.g. 0.15,
                           if a hand frequently goes undetected) -- see "Hand tracking" note below
 --confidence-threshold F  drop matches below this confidence, 0..1 (default 0.0 = keep all)
+--no-clahe                skip CLAHE contrast enhancement of the tracker's input (helps on dark video); on by default
 --no-midi-recover         skip the MIDI-anchored recovery pass (re-runs MediaPipe cropped around keys where
                           a note sounds but no hand was tracked); on by default
+--no-midi-hand-prior      skip the MIDI register-clustering hand prior that fixes low-confidence L/R where
+                          hands are close together; on by default
+--no-merge-split          skip recovering a second hand when two register-separated hands merged into one
+                          (uses the MIDI cluster split point); on by default
+--no-voice-separation     skip the video-seeded bass/melody voice model that reassigns ambiguous notes
+                          (register + pitch recurrence + lowest-voice); on by default
+--blob-recover            enable skin-blob (YCrCb) hand recovery for hands that touch/overlap in the same
+                          register; OFF by default (may need per-video skin tuning)
 --no-reconstruct          skip the kinematic outlier-removal pass that drops teleporting fingertip glitches
                           before matching; on by default
 --flip-handedness         swap detected L/R hand labels (see "Hand tracking" note below)
@@ -593,14 +612,31 @@ importing the MIDI and using "Import fingering analysis (dev)" separately,
 but one step. If the wizard is cancelled or the import fails, the fingering
 is not applied (and nothing in the previously-open song is touched).
 
-## Recent Improvements
+## How the hand-assignment works (v1.0.0)
 
-- **Metadata support:** Song metadata (Artist, Title, Genre, Difficulty) is now stored in `.symple` bundles and imported directly into Symplethesia
+Getting left/right right is the whole point, so SMaPE stacks several
+independent signals — each a step that only steps in where the ones before it
+were unsure. All are on by default except skin-blob recovery.
+
+| Step | What it does |
+|------|--------------|
+| **Wider analysis area** | Includes the whole hand (palm + wrist), so overhead shots don't clip the hands and lose detection |
+| **Contrast boost (CLAHE)** | Lifts detail in dark/low-contrast footage before tracking |
+| **MediaPipe tracking** | Finds hands and fingertips per frame |
+| **Targeted re-detection** | Where a note sounds but no hand was tracked there, re-runs the detector zoomed in on that key |
+| **Register prior** | Bass → left, treble → right, with a boundary that follows the music |
+| **Merge-split** | When two register-separated hands merge into one detection, rebuilds the missing one |
+| **Voice model** | Learns each hand's bass/melody pattern from the clear passages and applies it to the ambiguous ones |
+| **Skin-blob recovery** *(optional)* | An independent skin-colour tracker that splits two hands playing close together |
+| **Kinematic cleanup** | Drops physically-impossible "teleporting" fingertip glitches |
+
+## Earlier improvements
+
+- **Metadata support:** Song metadata (Artist, Title, Genre, Difficulty) is stored in `.symple` bundles and imported directly into Symplethesia
 - **Auto-fill metadata:** Extracts song info from video titles intelligently (supports "Artist - Song" patterns)
 - **Better feedback:** Progress messages show what the tool is doing at each phase (download, calibration, transcription)
 - **Enhanced UI:** Dialogs auto-fit to screen size; frame navigation with Page Up/Page Down (±150 frames)
 - **Octave shifting:** Shift the entire keyboard calibration overlay by octave (< / > keys) when auto-detection is off by one
-- **Finger position accuracy:** Each bundle includes accuracy notes and links to GitHub and Symplethesia
 
 ## GUI
 
@@ -664,14 +700,25 @@ A tooltip's **Don't show this again** checkbox persists across launches (in
 
 Everything not covered by the 3-step flow lives behind the **⚙** icon,
 pinned bottom-right and clickable at any time -- including mid-run, since it
-opens as a separate, non-blocking window rather than a modal dialog:
-Transcribe/Render mode overrides (secondary to the 3-button choice on page
-2, for deviating from a preset), MIDI file, FPS, Offset, Sync method,
-Calibration file (a compatibility placeholder -- see "Calibration" above),
-Min hand confidence, Confidence threshold, Align video/MIDI before analysis,
-Render preview video, Also write a `.symple` bundle, Flip render hand
-colours, and the three ghost-note fields (Onset threshold, Min velocity,
-Min duration -- see "Reducing ghost notes" above).
+opens as a separate, non-blocking window rather than a modal dialog. It's
+grouped into labelled sections; the defaults are tuned so most people never
+need to touch it.
+
+Under **Hand tracking** you'll find the accuracy toggles from
+["How the hand-assignment works"](#how-the-hand-assignment-works-v100) as
+plain checkboxes — all on by default except one:
+
+- **MIDI-anchored hand recovery** — re-find a hand the tracker missed (on).
+- **Skin-blob hand recovery** — for hands that touch/overlap in the same
+  register (**off** by default; turn it on for close-hands ballads where one
+  hand is under-tracked).
+- **Enhance contrast for detection (CLAHE)** — for dark video (on).
+- **Live tracking view** — show the hand detection in the run screen (on).
+
+The rest covers Transcribe/Render overrides, MIDI file, FPS, Offset, Sync
+method, Min hand confidence, Confidence threshold, alignment, preview video,
+`.symple` bundle, flip render hand colours, and the three ghost-note fields
+(Onset threshold, Min velocity, Min duration -- see "Reducing ghost notes").
 
 > The Low/High pitch fields and the on-screen 88-key picker were **removed** —
 > with C/G-key calibration the range is auto-derived from the MIDI and no
