@@ -206,6 +206,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-align", action="store_true", default=False, help="Skip the interactive video/MIDI alignment step (before hand tracking)")
     p.add_argument("--no-reconstruct", action="store_true", default=False, help="Skip the kinematic outlier-removal pass (stages 3+4) that drops teleporting fingertip glitches before matching")
     p.add_argument("--no-midi-recover", action="store_true", default=False, help="Skip the MIDI-anchored recovery pass that re-runs MediaPipe cropped around keys where a note sounds but no hand was tracked")
+    p.add_argument("--no-midi-hand-prior", action="store_true", default=False, help="Skip the MIDI register-clustering hand prior that fixes low-confidence L/R assignments where hands are close together")
+    p.add_argument("--no-merge-split", action="store_true", default=False, help="Skip the merge-split pass that recovers a second hand when MediaPipe merged two close hands into one (uses the MIDI cluster split point)")
+    p.add_argument("--no-voice-separation", action="store_true", default=False, help="Skip the video-seeded voice separation that reassigns ambiguous notes from the learned bass/melody pattern (register + pitch recurrence + lowest-voice)")
+    p.add_argument("--blob-recover", action="store_true", default=False, help="Enable the skin-blob hand recovery (layer 2): re-find a missing/merged hand via YCrCb skin segmentation. Opt-in -- may need per-video skin tuning")
+    p.add_argument("--no-clahe", action="store_true", default=False, help="Skip CLAHE local-contrast enhancement of MediaPipe's input (helps hand detection on dark/low-contrast video)")
     p.add_argument("--fps", type=float, default=30.0, help="Frame sampling rate for hand tracking (default 30)")
     p.add_argument("--flip-handedness", action="store_true", default=False, help="Swap detected L/R hand labels (use if --preview shows hands swapped)")
     p.add_argument(
@@ -704,13 +709,20 @@ def _mux_audio(video_path: str, audio_path: str, out_path: str) -> bool:
 
 def run_preview(video_path: str, calib, midi_data, offset_sec: float, fingertip_frames, fps: float) -> None:
     import cv2  # lazy import
-    from hands import interpolate_fingertips
+    from hands import interpolate_fingertips, _keyboard_crop_box
     from keyboard import undistort_frame, draw_keyboard_overlay
 
     cap = cv2.VideoCapture(video_path)
     src_fps = cap.get(cv2.CAP_PROP_FPS) or fps
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # The region actually fed to MediaPipe during tracking (the keyboard crop).
+    # Drawn as a yellow rectangle so it's obvious whether the analysis area
+    # covered the hands -- a crop that clips the palms is the usual cause of
+    # missed detections on overhead shots.
+    crop_y1, crop_y2, crop_x1, crop_x2 = _keyboard_crop_box(calib, h, w)
+    show_crop = (crop_y1 > 0 or crop_y2 < h or crop_x1 > 0 or crop_x2 < w)
     out_path = "preview.mp4"
     video_only_path = "preview_video.mp4"
     writer = cv2.VideoWriter(video_only_path, cv2.VideoWriter_fourcc(*"mp4v"), src_fps, (w, h))
@@ -775,6 +787,12 @@ def run_preview(video_path: str, calib, midi_data, offset_sec: float, fingertip_
             color = HAND_BGR.get(hand, GHOST_BGR)
             cv2.circle(frame, (int(x), int(y)), 6, color, -1)
             cv2.putText(frame, f"{hand}{finger}", (int(x) + 6, int(y)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        if show_crop:
+            cv2.rectangle(frame, (crop_x1, crop_y1), (crop_x2 - 1, crop_y2 - 1),
+                          (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, "analysis area", (crop_x1 + 6, max(18, crop_y1 + 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
 
         writer.write(frame)
         idx += 1
@@ -1579,7 +1597,7 @@ def analyze(args: argparse.Namespace) -> dict:
         fingertip_frames = extract_fingertip_frames(
             video_path, fps=args.fps, flip_handedness=args.flip_handedness, k1=calib.k1,
             min_hand_confidence=args.min_hand_confidence, calib=calib,
-            live_frame_path=args.live_frame_path,
+            live_frame_path=args.live_frame_path, enhance_contrast=not args.no_clahe,
         )
         from hands import fix_handedness_continuity
         fix_handedness_continuity(fingertip_frames)
@@ -1605,7 +1623,7 @@ def analyze(args: argparse.Namespace) -> dict:
             retry_frames = extract_fingertip_frames(
                 video_path, fps=args.fps, flip_handedness=args.flip_handedness, k1=calib.k1,
                 min_hand_confidence=RETRY_HAND_CONFIDENCE, calib=calib,
-                live_frame_path=args.live_frame_path,
+                live_frame_path=args.live_frame_path, enhance_contrast=not args.no_clahe,
             )
             fix_handedness_continuity(retry_frames)
             retry_rate = dual_hand_rate(retry_frames)
@@ -1657,12 +1675,42 @@ def analyze(args: argparse.Namespace) -> dict:
                 offset_sec=offset_sec, fps=args.fps, k1=calib.k1,
                 flip_handedness=args.flip_handedness,
                 min_hand_confidence=args.min_hand_confidence,
+                enhance_contrast=not args.no_clahe,
             )
             print(f"  {rec_stats.summary()}")
             if rec_stats.hands_recovered:
                 fix_handedness_continuity(fingertip_frames)
                 new_rate = dual_hand_rate(fingertip_frames)
                 print(f"  both hands tracked in {new_rate * 100:.0f}% of frames after recovery")
+
+        # Merge-split pass: for frames where only one hand was tracked but the
+        # sounding MIDI notes split into two hand-sized clusters (hands playing
+        # close together -> MediaPipe merged them into one palm), synthesize a
+        # coarse observation for the missing hand at the uncovered cluster so
+        # its notes get the right L/R. See merge_split.py.
+        if not args.no_merge_split:
+            from merge_split import split_merged_hands
+
+            ms_stats = split_merged_hands(fingertip_frames, calib, midi_data.notes, offset_sec=offset_sec)
+            print(f"  {ms_stats.summary()}")
+            if ms_stats.hands_synthesized:
+                fix_handedness_continuity(fingertip_frames)
+
+        # Blob-recover pass (layer 2, opt-in): where MediaPipe still tracked
+        # fewer than two hands, use a skin blob on the missing side (splitting a
+        # merged blob at its seam) to synthesize a coarse hand there. This is
+        # the spatial recovery that the register/voice signals can't do when the
+        # hands overlap -- and it produces the balanced hand labels the voice
+        # separation needs. Needs per-video skin tuning, hence off by default.
+        # See blobtrack.py.
+        if args.blob_recover:
+            from blobtrack import blob_recover_hands
+
+            bl_stats = blob_recover_hands(video_path, fingertip_frames, calib,
+                                          fps=args.fps, k1=calib.k1)
+            print(f"  {bl_stats.summary()}")
+            if bl_stats.hands_synthesized:
+                fix_handedness_continuity(fingertip_frames)
 
         # Reconstruction pass (stages 3+4): drop physically-impossible fingertip
         # spikes so interpolation bridges them instead of the matcher trusting a
@@ -1712,6 +1760,32 @@ def analyze(args: argparse.Namespace) -> dict:
 
             group_results = resolve_chord_conflicts(notes_to_match, candidates, scale=KEY_MATCH_SCALE)
             results.update(group_results)
+
+        # MIDI hand-prior (unified hand-assignment, layer 1): where the video
+        # evidence is weak/ambiguous, defer the L/R choice to what the MIDI
+        # register clustering says -- this is where "notes bleed across the hand
+        # boundary" happens (hands close together, low match confidence). Strong
+        # video matches are left untouched. See midi_hand_prior.py.
+        if not args.no_midi_hand_prior:
+            from midi_hand_prior import compute_hand_prior, fuse_prior_into_results
+
+            priors = compute_hand_prior(midi_data.notes)
+            n_corr = fuse_prior_into_results(results, midi_data.notes, priors)
+            if n_corr:
+                print(f"  MIDI hand-prior corrected {n_corr} low-confidence note(s) to the register-implied hand")
+
+        # Voice separation seeded by the confident video labels: for the hardest
+        # case (hands close together in the same register, where neither the
+        # register prior nor space can split them), learn each hand's signature
+        # -- register, which pitches it repeats, bass = lowest voice -- from the
+        # high-confidence passages and apply it to the ambiguous ones. See
+        # voice_separation.py.
+        if not args.no_voice_separation:
+            from voice_separation import refine_hands_by_voice
+
+            n_voice = refine_hands_by_voice(results, midi_data.notes)
+            if n_voice:
+                print(f"  voice separation reassigned {n_voice} ambiguous note(s) from the learned bass/melody pattern")
 
         # Video-based reconciliation (Phase D): cross-checks each matched note
         # against the video's own hand tracking to flag/drop ghost notes and

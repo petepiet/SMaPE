@@ -151,11 +151,18 @@ def _keyboard_crop_box(calib, frame_h: int, frame_w: int):
     key_y_min = min(ys)
     key_y_max = max(ys)
 
-    # Hands play above the keyboard (smaller y in image coords when keyboard
-    # is in the lower half of the frame). Give 40 % of frame height as
-    # headroom above and a small margin below.
+    # Depending on the camera setup the hand BODY (palm + wrist) can sit either
+    # above the key line (camera behind the player, hands reaching in from the
+    # far/music-stand side) OR below it (overhead camera in front, hands coming
+    # from the near/player edge -- fingers reach up onto the keys while palms and
+    # wrists fall below). MediaPipe's first stage is a PALM detector, so a crop
+    # that clips the palm/wrist drops detection to zero even when the fingers are
+    # perfectly visible. Empirically, cropping to just the key strip on an
+    # overhead shot yields 0 hands; extending past the palms recovers both. So
+    # give generous headroom on BOTH sides -- the modest loss of zoom costs far
+    # less than losing a whole hand.
     margin_above = min(int(frame_h * 0.40), 400)
-    margin_below = min(int(frame_h * 0.10), 80)
+    margin_below = min(int(frame_h * 0.35), 350)
 
     y1 = max(0, int(key_y_min) - margin_above)
     y2 = min(frame_h, int(key_y_max) + margin_below)
@@ -213,6 +220,28 @@ def fix_handedness_continuity(frames):
     return frames
 
 
+def _make_clahe():
+    """CLAHE operator for local-contrast enhancement of MediaPipe's input.
+    Modest clip limit so it lifts detail in dark/low-contrast footage (a common
+    cause of missed hands) without amplifying compression noise into false
+    texture. Reused across frames (creating one per frame is wasteful)."""
+    import cv2  # lazy
+    return cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+
+
+def _clahe_enhance(bgr, clahe):
+    """Apply CLAHE to the L (lightness) channel of a BGR image and return BGR.
+    Only lightness is touched, so hue/skin-tone cues MediaPipe relies on are
+    preserved. Enhancing only affects detection quality -- landmark coordinates
+    are normalised, so this never shifts the mapping back to pixels."""
+    import cv2  # lazy
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    l_channel = clahe.apply(l_channel)
+    merged = cv2.merge((l_channel, a_channel, b_channel))
+    return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
+
 def _result_to_observations(result, cx: float, cy: float, cw: float, ch: float,
                             flip_handedness: bool) -> list:
     """Convert a MediaPipe HandLandmarker result into HandObservations, mapping
@@ -260,6 +289,7 @@ def extract_fingertip_frames(
     min_hand_confidence: float = 0.3,
     calib=None,
     live_frame_path: Optional[str] = None,
+    enhance_contrast: bool = True,
 ):
     """Runs MediaPipe's HandLandmarker (Tasks API) over the video and
     returns a list of `FingertipFrame`, one per sampled frame at the
@@ -319,6 +349,8 @@ def extract_fingertip_frames(
     crop_w = crop_x2 - crop_x1
     using_crop = (crop_y1 > 0 or crop_y2 < orig_h or crop_x1 > 0 or crop_x2 < orig_w)
 
+    clahe = _make_clahe() if enhance_contrast else None
+
     frames: list = []
     with _suppress_native_stderr():
         landmarker_ctx = HandLandmarker.create_from_options(options)
@@ -332,14 +364,19 @@ def extract_fingertip_frames(
             if k1 != 0.0:
                 frame = undistort_frame(frame, k1)
             if idx % frame_stride == 0:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 time_sec = idx / src_fps
                 timestamp_ms = int(round(time_sec * 1000))
                 if timestamp_ms <= last_timestamp_ms:
                     timestamp_ms = last_timestamp_ms + 1
                 last_timestamp_ms = timestamp_ms
 
-                mp_input = rgb[crop_y1:crop_y2, crop_x1:crop_x2] if using_crop else rgb
+                # Enhance the MediaPipe input only (not `frame`, which feeds the
+                # live view and stays the true image). Crop first, enhance the
+                # smaller region, then convert to RGB.
+                mp_bgr = frame[crop_y1:crop_y2, crop_x1:crop_x2] if using_crop else frame
+                if clahe is not None:
+                    mp_bgr = _clahe_enhance(mp_bgr, clahe)
+                mp_input = cv2.cvtColor(mp_bgr, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=mp_input)
                 result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
@@ -349,6 +386,14 @@ def extract_fingertip_frames(
                 frames.append(FingertipFrame(time_sec=time_sec, hands=observations))
                 if live_frame_path:
                     _disp = frame.copy()
+                    # Yellow rectangle = the region actually fed to MediaPipe
+                    # (the keyboard crop). Makes it obvious when the crop is
+                    # clipping the hands -- the usual cause of missed detections.
+                    if using_crop:
+                        cv2.rectangle(_disp, (crop_x1, crop_y1), (crop_x2 - 1, crop_y2 - 1),
+                                      (0, 255, 255), 2, cv2.LINE_AA)
+                        cv2.putText(_disp, "analysis area", (crop_x1 + 6, max(18, crop_y1 + 18)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
                     for _obs in observations:
                         _color = (50, 100, 255) if _obs.hand == "R" else (50, 210, 100)
                         for _tip in _obs.fingertips:
@@ -452,6 +497,7 @@ def recover_missing_hands(
     margin_keys: float = 4.0,
     dedup_px: float = 60.0,
     max_recover_frames: "int | None" = None,
+    enhance_contrast: bool = True,
 ) -> RecoverStats:
     """Targeted second MediaPipe pass, anchored on MIDI (pipeline stage: hand
     recovery). For each sampled frame where fewer than two hands were tracked
@@ -528,6 +574,7 @@ def recover_missing_hands(
     if max_recover_frames is not None and len(targets) > max_recover_frames:
         targets = targets[:max_recover_frames]
 
+    clahe = _make_clahe() if enhance_contrast else None
     options = mp.tasks.vision.HandLandmarkerOptions(
         base_options=mp.tasks.BaseOptions(model_asset_path=str(_model_path())),
         running_mode=mp.tasks.vision.RunningMode.IMAGE,
@@ -552,6 +599,8 @@ def recover_missing_hands(
             if cx2 - cx1 < 20 or cy2 - cy1 < 20:
                 continue
             crop = raw[cy1:cy2, cx1:cx2]
+            if clahe is not None:
+                crop = _clahe_enhance(crop, clahe)
             rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             result = landmarker.detect(mp_image)

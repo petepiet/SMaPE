@@ -369,6 +369,8 @@ class FingeringGUI:
         # manual picking is the more reliable path until that's improved.
         self.pick_hand_colors_var = tk.BooleanVar(value=True)
         self.midi_recover_var = tk.BooleanVar(value=True)
+        self.blob_recover_var = tk.BooleanVar(value=False)
+        self.clahe_var = tk.BooleanVar(value=True)
         self.live_view_var = tk.BooleanVar(value=True)
         self._live_frame_path = None
         self._live_photo = None
@@ -1227,6 +1229,37 @@ class FingeringGUI:
         )
         arow += 1
 
+        blob_recover_check = ttk.Checkbutton(
+            adv, text="Skin-blob hand recovery (for hands that touch/overlap — may need tuning)",
+            variable=self.blob_recover_var,
+        )
+        blob_recover_check.grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
+        Tooltip(
+            blob_recover_check, key="blob_recover",
+            text="Independent skin-colour (YCrCb) segmentation that finds the two hands as blobs, splitting a "
+            "merged blob at its seam. Recovers a hand MediaPipe merged/dropped when the hands play close "
+            "together in the same register (where the MIDI register split and voice separation can't help). "
+            "Off by default: skin segmentation can need per-video tuning; enable it for close-hands pieces "
+            "where one hand is under-tracked.",
+            prefs=self.prefs,
+        )
+        arow += 1
+
+        clahe_check = ttk.Checkbutton(
+            adv, text="Enhance contrast for detection (CLAHE — helps on dark/low-contrast video)",
+            variable=self.clahe_var,
+        )
+        clahe_check.grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
+        Tooltip(
+            clahe_check, key="clahe",
+            text="Applies CLAHE local-contrast enhancement to the lightness channel of MediaPipe's input "
+            "before hand detection. Lifts detail in dark or low-contrast footage (a common cause of missed "
+            "hands) without changing hue/skin-tone cues. Affects detection only, not the exported video. "
+            "On by default; uncheck if it makes detection worse on already well-lit video.",
+            prefs=self.prefs,
+        )
+        arow += 1
+
         ttk.Checkbutton(
             adv, text="Live tracking view (show hand detection in the run screen while processing)",
             variable=self.live_view_var,
@@ -1676,6 +1709,10 @@ class FingeringGUI:
 
         if not self.midi_recover_var.get():
             argv.append("--no-midi-recover")
+        if self.blob_recover_var.get():
+            argv.append("--blob-recover")
+        if not self.clahe_var.get():
+            argv.append("--no-clahe")
 
         if self.live_view_var.get() and _HAS_PIL:
             self._live_frame_path = tempfile.mktemp(suffix=".jpg", prefix="smape_live_")
@@ -2020,6 +2057,10 @@ class FingeringGUI:
             argv.append("--no-gpu")
         if not self.midi_recover_var.get():
             argv.append("--no-midi-recover")
+        if self.blob_recover_var.get():
+            argv.append("--blob-recover")
+        if not self.clahe_var.get():
+            argv.append("--no-clahe")
         onset_threshold = self.onset_threshold_var.get().strip()
         if onset_threshold:
             argv += ["--onset-threshold", onset_threshold]
