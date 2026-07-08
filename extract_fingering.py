@@ -1607,7 +1607,10 @@ def analyze(args: argparse.Namespace) -> dict:
                 "onsetTick": note.onset_tick,
                 "pitch": note.pitch,
                 "hand": m.hand,
-                "finger": m.finger,
+                # finger 0 = wrist match, finger 6 = palm match — hand known
+                # but specific finger is not; write null so Symplethesia shows
+                # hand colouring without a finger number overlay.
+                "finger": m.finger if 1 <= m.finger <= 5 else None,
                 "confidence": round(m.confidence, 4),
             }
 

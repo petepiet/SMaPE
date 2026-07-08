@@ -21,6 +21,8 @@ import os
 from dataclasses import dataclass, field
 
 FINGERTIP_LANDMARKS = {1: 4, 2: 8, 3: 12, 4: 16, 5: 20}  # finger number -> landmark index
+WRIST_LANDMARK = 0
+PALM_LANDMARKS = [5, 9, 13, 17]  # MCP knuckles — stable base row, one per finger
 
 
 @contextlib.contextmanager
@@ -63,6 +65,8 @@ class Fingertip:
 class HandObservation:
     hand: str  # 'L' or 'R'
     fingertips: list  # list[Fingertip], one per finger 1..5 (may be partial)
+    wrist: object = None   # (x, y) of landmark 0 — most stable hand point
+    palm: object = None    # (x, y) of average MCP knuckles (lm 5,9,13,17)
 
 
 @dataclass
@@ -73,10 +77,19 @@ class FingertipFrame:
     hands: list = field(default_factory=list)  # list[HandObservation]
 
     def fingertip_positions(self):
-        """Yields (hand, finger, x, y) for every fingertip in this frame."""
+        """Yields (hand, finger, x, y) for every tracked point in this frame.
+
+        finger 1-5 = fingertips (thumb→pinky)
+        finger 0   = wrist (most stable, used as fallback for hand assignment)
+        finger 6   = palm center / MCP knuckles (best hand-region estimate)
+        """
         for obs in self.hands:
             for tip in obs.fingertips:
                 yield obs.hand, tip.finger, tip.x, tip.y
+            if obs.wrist is not None:
+                yield obs.hand, 0, obs.wrist[0], obs.wrist[1]
+            if obs.palm is not None:
+                yield obs.hand, 6, obs.palm[0], obs.palm[1]
 
 
 MODEL_URL = (
@@ -203,7 +216,16 @@ def extract_fingertip_frames(
                         for finger, lm_idx in FINGERTIP_LANDMARKS.items():
                             lm = landmarks[lm_idx]
                             tips.append(Fingertip(finger=finger, x=lm.x * w, y=lm.y * h))
-                        observations.append(HandObservation(hand=hand_code, fingertips=tips))
+                        wlm = landmarks[WRIST_LANDMARK]
+                        wrist = (wlm.x * w, wlm.y * h)
+                        plms = [landmarks[i] for i in PALM_LANDMARKS]
+                        palm = (
+                            sum(p.x * w for p in plms) / len(plms),
+                            sum(p.y * h for p in plms) / len(plms),
+                        )
+                        observations.append(HandObservation(
+                            hand=hand_code, fingertips=tips, wrist=wrist, palm=palm,
+                        ))
                 frames.append(FingertipFrame(time_sec=time_sec, hands=observations))
             idx += 1
     cap.release()
