@@ -1811,6 +1811,17 @@ class FingeringGUI:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    # Decode the child's output as UTF-8 (it emits UTF-8 --
+                    # we set PYTHONIOENCODING/PYTHONUTF8 for it above). Without
+                    # this, text mode uses the parent's locale codec (cp1252 on
+                    # Windows), which chokes on the first non-cp1252 byte (e.g.
+                    # 0x90 from pip/yt-dlp/ffmpeg output, or any UTF-8 multibyte
+                    # char) and killed the whole run with a "charmap codec can't
+                    # decode" error surfaced as a bogus "Failed to launch". Any
+                    # stray undecodable byte from a non-Python child becomes the
+                    # replacement char instead of crashing the reader.
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                     **POPEN_KWARGS,
                 )
