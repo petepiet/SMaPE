@@ -210,44 +210,92 @@ def extract_fingertip_frames(
     return frames
 
 
-def interpolate_fingertips(frames, time_sec: float):
-    """Given a sorted list of FingertipFrame, linearly interpolate fingertip
-    positions to an exact `time_sec` from the two nearest frames (by
-    matching same hand+finger across frames). Returns a FingertipFrame-like
-    list of (hand, finger, x, y) tuples.
+# Maximum gap between two detection frames to still interpolate between them.
+# Beyond this, the hand moved too far or was occluded too long to trust the
+# straight-line path (octave jumps, hand leaving frame, etc.).
+_MAX_INTERP_GAP_SEC = 0.20
 
-    Pure-python/numpy-free logic; used both with real MediaPipe frames and
-    with synthetic frames in selftest.py.
+# Maximum distance from a single detection frame to still carry its position
+# forward or backward in time when the other side has no detection.
+# Covers brief dropouts (2-4 frames at 25-30 fps) without bridging real gaps.
+_MAX_CARRY_SEC = 0.15
+
+
+def interpolate_fingertips(frames, time_sec: float,
+                           max_interp_gap: float = _MAX_INTERP_GAP_SEC,
+                           max_carry: float = _MAX_CARRY_SEC):
+    """Interpolate fingertip positions to time_sec from the nearest frames
+    that actually contain hand detections (not just the nearest frames by
+    time, which are usually empty).
+
+    - Both sides detected within max_interp_gap → linear interpolation.
+    - Only one side detected within max_carry → carry that position.
+    - Gap larger than the applicable limit → return [] (no candidates).
+
+    Pure-python/numpy-free; used with real MediaPipe frames and in selftest.py.
     """
     if not frames:
         return []
-    if time_sec <= frames[0].time_sec:
-        return list(frames[0].fingertip_positions())
-    if time_sec >= frames[-1].time_sec:
-        return list(frames[-1].fingertip_positions())
 
-    # Binary search for the bracketing pair.
-    lo, hi = 0, len(frames) - 1
-    while hi - lo > 1:
+    # Binary search: find the insertion point for time_sec in frames[].time_sec.
+    lo, hi = 0, len(frames)
+    while lo < hi:
         mid = (lo + hi) // 2
         if frames[mid].time_sec <= time_sec:
-            lo = mid
+            lo = mid + 1
         else:
             hi = mid
-    fa, fb = frames[lo], frames[hi]
-    span = fb.time_sec - fa.time_sec
-    t = 0.0 if span <= 0 else (time_sec - fa.time_sec) / span
+    # frames[lo-1].time_sec <= time_sec < frames[lo].time_sec
+    pivot = lo  # first frame strictly after time_sec
 
-    a_map = {(h, f): (x, y) for h, f, x, y in fa.fingertip_positions()}
-    b_map = {(h, f): (x, y) for h, f, x, y in fb.fingertip_positions()}
+    # Walk backward from pivot to find nearest frame WITH detections at/before time_sec.
+    before = None
+    for i in range(pivot - 1, -1, -1):
+        if frames[i].hands:
+            before = frames[i]
+            break
+        if time_sec - frames[i].time_sec > max_interp_gap:
+            break  # too far back, no point continuing
 
-    out = []
-    for key in set(a_map) | set(b_map):
-        if key in a_map and key in b_map:
-            (ax, ay), (bx, by) = a_map[key], b_map[key]
-            out.append((key[0], key[1], ax + (bx - ax) * t, ay + (by - ay) * t))
-        elif key in a_map:
-            out.append((key[0], key[1], *a_map[key]))
-        else:
-            out.append((key[0], key[1], *b_map[key]))
-    return out
+    # Walk forward from pivot to find nearest frame WITH detections after time_sec.
+    after = None
+    for i in range(pivot, len(frames)):
+        if frames[i].hands:
+            after = frames[i]
+            break
+        if frames[i].time_sec - time_sec > max_interp_gap:
+            break  # too far ahead
+
+    def _lerp(fa, fb):
+        span = fb.time_sec - fa.time_sec
+        t = 0.0 if span <= 0 else (time_sec - fa.time_sec) / span
+        a_map = {(h, f): (x, y) for h, f, x, y in fa.fingertip_positions()}
+        b_map = {(h, f): (x, y) for h, f, x, y in fb.fingertip_positions()}
+        out = []
+        for key in set(a_map) | set(b_map):
+            if key in a_map and key in b_map:
+                (ax, ay), (bx, by) = a_map[key], b_map[key]
+                out.append((key[0], key[1], ax + (bx - ax) * t, ay + (by - ay) * t))
+            elif key in a_map:
+                out.append((key[0], key[1], *a_map[key]))
+            else:
+                out.append((key[0], key[1], *b_map[key]))
+        return out
+
+    if before is not None and after is not None:
+        if after.time_sec - before.time_sec <= max_interp_gap:
+            return _lerp(before, after)
+        # Gap too large: use whichever side is closer, within carry limit.
+        dist_b = time_sec - before.time_sec
+        dist_a = after.time_sec - time_sec
+        if dist_b <= dist_a and dist_b <= max_carry:
+            return list(before.fingertip_positions())
+        if dist_a < dist_b and dist_a <= max_carry:
+            return list(after.fingertip_positions())
+        return []
+
+    if before is not None and time_sec - before.time_sec <= max_carry:
+        return list(before.fingertip_positions())
+    if after is not None and after.time_sec - time_sec <= max_carry:
+        return list(after.fingertip_positions())
+    return []
