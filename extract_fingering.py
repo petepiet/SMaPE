@@ -1008,6 +1008,97 @@ def _derive_pitch_range(args: argparse.Namespace, midi_data, quiet: bool = False
     return low_pitch, high_pitch
 
 
+def _auto_correct_calibration_octave(calib, midi_notes, calib_key):
+    """Cross-check calibration's low_pitch/high_pitch against the MIDI's actual
+    pitch distribution to detect and correct octave errors introduced by the CV
+    auto-detector (which often guesses the octave wrong by one).
+
+    The MIDI (from audio transcription or a supplied reference file) has correct
+    absolute pitches and acts as ground truth. Strategy:
+
+    1. Build a sorted list of all played pitches from the MIDI.
+    2. Take the 5th-percentile pitch as the low anchor and the 95th-percentile
+       as the high anchor, avoiding spurious outliers.
+    3. Snap each anchor to the nearest 'piano keyboard edge' pitch -- a C note
+       (pitch % 12 == 0) or an A note (pitch % 12 == 9), which are the natural
+       start/end points of real piano keyboards.
+    4. Compare the snapped anchors with calib.low_pitch / calib.high_pitch.
+    5. If both anchors agree on exactly the same offset AND that offset is a
+       clean multiple of 12 (one or two octaves) → auto-correct low_pitch /
+       high_pitch and re-save the calibration.
+
+    Does nothing and returns the calibration unchanged if the MIDI has fewer
+    than 10 notes, if the anchors disagree, or if the shift is not a clean
+    octave multiple.
+
+    Returns the (possibly corrected) calibration.
+    """
+    if not midi_notes or len(midi_notes) < 10:
+        return calib
+
+    import numpy as np
+    from keyboard import pitch_to_note_name
+
+    pitches = sorted(n.pitch for n in midi_notes)
+
+    # 5th-percentile = low anchor (lowest typical note, ignoring rare outliers)
+    # 95th-percentile = high anchor (highest typical note, ignoring rare outliers)
+    low_anchor = int(np.percentile(pitches, 5))
+    high_anchor = int(np.percentile(pitches, 95))
+
+    def snap_to_keyboard_edge(pitch):
+        """Snap pitch to the nearest C (pitch%12==0) or A (pitch%12==9) within
+        a ±6 semitone window -- the natural start/end pitches of piano keyboards."""
+        best, best_dist = None, float("inf")
+        for p in range(max(0, pitch - 6), min(127, pitch + 7)):
+            if p % 12 == 0 or p % 12 == 9:
+                d = abs(p - pitch)
+                if d < best_dist:
+                    best_dist, best = d, p
+        return best
+
+    snapped_low = snap_to_keyboard_edge(low_anchor)
+    snapped_high = snap_to_keyboard_edge(high_anchor)
+
+    if snapped_low is None or snapped_high is None:
+        return calib
+
+    low_offset = snapped_low - calib.low_pitch
+    high_offset = snapped_high - calib.high_pitch
+
+    if low_offset == 0 and high_offset == 0:
+        return calib  # calibration already agrees with MIDI
+
+    # Only auto-correct when both anchors agree on the same clean octave shift
+    if low_offset == high_offset and abs(low_offset) in (12, 24):
+        old_low_name = pitch_to_note_name(calib.low_pitch)
+        old_high_name = pitch_to_note_name(calib.high_pitch)
+        new_low = calib.low_pitch + low_offset
+        new_high = calib.high_pitch + low_offset
+        new_low_name = pitch_to_note_name(new_low)
+        new_high_name = pitch_to_note_name(new_high)
+        print(f"Auto-correcting octave: calibration was {old_low_name}-{old_high_name}, "
+              f"MIDI suggests {new_low_name}-{new_high_name}, shifting by {low_offset:+d}")
+        calib.low_pitch = new_low
+        calib.high_pitch = new_high
+        if calib_key:
+            from calibration_store import save_calibration
+            save_calibration(calib_key, calib)
+            print("  Corrected calibration saved.")
+    else:
+        # Offsets are non-zero but don't qualify for a clean auto-correction --
+        # log the mismatch so the user is aware but don't change anything.
+        print(f"  Octave check: MIDI pitch distribution suggests "
+              f"low≈{pitch_to_note_name(snapped_low)}, "
+              f"high≈{pitch_to_note_name(snapped_high)} "
+              f"(calibration: {pitch_to_note_name(calib.low_pitch)}"
+              f"-{pitch_to_note_name(calib.high_pitch)}) "
+              f"-- offsets ({low_offset:+d} / {high_offset:+d}) don't agree on "
+              f"a clean octave shift; skipping auto-correct.")
+
+    return calib
+
+
 def analyze(args: argparse.Namespace) -> dict:
     from keyboard import Calibration, pitch_to_white_index
     from midi_io import read_midi_notes, read_pedal_segments
@@ -1282,6 +1373,16 @@ def analyze(args: argparse.Namespace) -> dict:
         # printed the auto-set line when it read the MIDI; the transcribe
         # path is announcing this range for the first time here.
         low_pitch, high_pitch = _derive_pitch_range(args, midi_data, quiet=not args.transcribe)
+
+    # Auto-correct calibration octave if the MIDI pitch distribution disagrees
+    # by a clean octave (±12 or ±24 semitones) with calib.low/high_pitch. CV
+    # auto-detection often guesses the octave wrong; the MIDI (from audio
+    # transcription or the supplied reference) has correct absolute pitches and
+    # acts as ground truth to fix this silently without any user input.
+    from calibration_store import calibration_key as _calibration_key
+    calib = _auto_correct_calibration_octave(
+        calib, midi_data.notes, _calibration_key(args.video, channel_id)
+    )
 
     # Seed the offset BEFORE the slow hand tracking so it can be tuned first.
     # Transcribed MIDI is derived FROM this video's own audio, so its timeline
