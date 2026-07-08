@@ -210,6 +210,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-merge-split", action="store_true", default=False, help="Skip the merge-split pass that recovers a second hand when MediaPipe merged two close hands into one (uses the MIDI cluster split point)")
     p.add_argument("--no-voice-separation", action="store_true", default=False, help="Skip the video-seeded voice separation that reassigns ambiguous notes from the learned bass/melody pattern (register + pitch recurrence + lowest-voice)")
     p.add_argument("--blob-recover", action="store_true", default=False, help="Enable the skin-blob hand recovery (layer 2): re-find a missing/merged hand via YCrCb skin segmentation. Opt-in -- may need per-video skin tuning")
+    p.add_argument("--no-note-smoothing", action="store_true", default=False, help="Skip the final cleanup that flips isolated low-confidence notes whose hand disagrees with all their neighbours")
+    p.add_argument("--no-kinematic-check", action="store_true", default=False, help="Skip the physical-reachability check that flags/fixes same-hand leaps of >1.5 octaves within 200ms")
     p.add_argument("--no-clahe", action="store_true", default=False, help="Skip CLAHE local-contrast enhancement of MediaPipe's input (helps hand detection on dark/low-contrast video)")
     p.add_argument("--fps", type=float, default=30.0, help="Frame sampling rate for hand tracking (default 30)")
     p.add_argument("--flip-handedness", action="store_true", default=False, help="Swap detected L/R hand labels (use if --preview shows hands swapped)")
@@ -1786,6 +1788,29 @@ def analyze(args: argparse.Namespace) -> dict:
             n_voice = refine_hands_by_voice(results, midi_data.notes)
             if n_voice:
                 print(f"  voice separation reassigned {n_voice} ambiguous note(s) from the learned bass/melody pattern")
+
+        # Final neighbour-consistency cleanup: flip isolated low-confidence
+        # notes whose hand disagrees with every nearby note (the leftover
+        # wrong-coloured notes visible in Symplethesia). Genuine hand crossings
+        # (real confidence) are left alone. See note_smoothing.py.
+        if not args.no_note_smoothing:
+            from note_smoothing import smooth_note_hands
+
+            n_smooth = smooth_note_hands(results, midi_data.notes)
+            if n_smooth:
+                print(f"  note smoothing corrected {n_smooth} isolated low-confidence hand flip(s)")
+
+        # Physical-reachability check: one hand can't leap >1.5 octaves within
+        # 200ms, so a same-hand pair that does means one note is the other
+        # hand. Reports every violation; flips the low-confidence outlier.
+        # See kinematic_check.py.
+        if not args.no_kinematic_check:
+            from kinematic_check import check_hand_leaps
+
+            leaps, n_leap = check_hand_leaps(results, midi_data.notes)
+            if leaps:
+                print(f"  physical-reachability: {len(leaps)} impossible same-hand leap(s) "
+                      f">1.5 octaves within 200ms; fixed {n_leap}")
 
         # Video-based reconciliation (Phase D): cross-checks each matched note
         # against the video's own hand tracking to flag/drop ghost notes and
