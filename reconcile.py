@@ -184,6 +184,39 @@ def confidence_by_window(notes_with_confidence, window_sec: float = 10.0) -> lis
     ]
 
 
+# Below this fraction of sampled frames showing BOTH hands, the tracking is
+# assumed to have silently dropped one hand (rather than the pianist actually
+# playing one-handed): on a real two-handed cover video where MediaPipe's
+# detector sat just below threshold, the dual-hand rate measured 2% -- while
+# lowering min_hand_confidence recovered 90%. A genuinely one-handed piece
+# would also trip this, which is fine: the retry at a lower threshold is
+# harmless there (it just confirms what's visible).
+DUAL_HAND_RATE_MIN = 0.2
+
+# The confidence extract_fingering.py retries tracking at when the dual-hand
+# rate comes back below DUAL_HAND_RATE_MIN. Measured 93% dual-hand detection
+# at 0.15 on the same video that gave 2% at 0.5.
+RETRY_HAND_CONFIDENCE = 0.15
+
+
+def dual_hand_rate(frames) -> float:
+    """Fraction of frames in which BOTH hands ('L' and 'R') have at least one
+    tracked point. The cheap post-tracking health check for the most damaging
+    silent failure mode: MediaPipe dropping one hand entirely (every note then
+    matches the surviving hand's label and the other hand's notes all come
+    back no-finger-support with ~0 confidence). Duck-typed on
+    `fingertip_positions()` like everything else here, so selftest.py can
+    feed it synthetic frames. Returns 0.0 for an empty frame list."""
+    if not frames:
+        return 0.0
+    both = 0
+    for f in frames:
+        hands = {h for h, _fi, _x, _y in f.fingertip_positions()}
+        if "L" in hands and "R" in hands:
+            both += 1
+    return both / len(frames)
+
+
 # Hands closer together than this (white-key units) make the "nearest tracked
 # fingertip" check in reconcile_note ambiguous between hands -- fingertips
 # from BOTH hands then compete within the same few-key radius, well under

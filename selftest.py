@@ -69,7 +69,7 @@ from extract_fingering import default_out_path_from_video, build_arg_parser, _st
 from transcribe import filter_note_events
 from reconcile import (
     is_occluded, finger_leave_time, reconcile_note, confidence_by_window, _frame_times,
-    analyze_hand_spread, CLOSE_HANDS_THRESHOLD_KEYS,
+    analyze_hand_spread, CLOSE_HANDS_THRESHOLD_KEYS, dual_hand_rate,
 )
 from note_release import (
     compute_corrected_ends, ReleaseInput,
@@ -1167,6 +1167,21 @@ def test_analyze_hand_spread_averages_multiple_fingertips_per_hand():
     check(approx(report.mean_distance_keys, 10.0), f"expected centroid distance 10.0, got {report.mean_distance_keys}")
 
 
+def test_dual_hand_rate():
+    both = [("L", 1, 10.0, 0.0), ("R", 1, 30.0, 0.0)]
+    only_l = [("L", 1, 10.0, 0.0)]
+    # 2 of 4 frames have both hands -> 0.5. Empty frame counts as no hands.
+    frames = [
+        _FakeFrame(0.0, both),
+        _FakeFrame(0.1, only_l),
+        _FakeFrame(0.2, both),
+        _FakeFrame(0.3, []),
+    ]
+    check(approx(dual_hand_rate(frames), 0.5), f"expected 0.5, got {dual_hand_rate(frames)}")
+    check(dual_hand_rate([]) == 0.0, "empty frame list should give rate 0.0")
+    check(approx(dual_hand_rate([_FakeFrame(0.0, only_l)]), 0.0), "single-hand-only frames should give 0.0")
+
+
 # ---------------------------------------------------------------------------
 # Matching tests
 # ---------------------------------------------------------------------------
@@ -1586,6 +1601,7 @@ TESTS = [
     test_analyze_hand_spread_measures_centroid_distance,
     test_analyze_hand_spread_flags_close_hands,
     test_analyze_hand_spread_averages_multiple_fingertips_per_hand,
+    test_dual_hand_rate,
     test_matcher_picks_correct_finger,
     test_matcher_low_confidence_for_far_match,
     test_chord_conflict_resolution_no_reuse,
