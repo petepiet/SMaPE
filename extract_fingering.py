@@ -202,16 +202,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--no-cv-calibration", action="store_true", default=False, help="Skip automatic CV keyboard detection; go straight to manual C/G-key clicking")
     p.add_argument("--preview", action="store_true", help="Render a preview video with detected fingertips + synced key highlight, for eyeballing alignment")
+    p.add_argument("--live-frame-path", default=None, help="Path for per-frame JPEG written by hands.py during tracking (used by the GUI live view)")
     p.add_argument("--no-align", action="store_true", default=False, help="Skip the interactive video/MIDI alignment step (before hand tracking)")
+    p.add_argument("--no-reconstruct", action="store_true", default=False, help="Skip the kinematic outlier-removal pass (stages 3+4) that drops teleporting fingertip glitches before matching")
+    p.add_argument("--no-midi-recover", action="store_true", default=False, help="Skip the MIDI-anchored recovery pass that re-runs MediaPipe cropped around keys where a note sounds but no hand was tracked")
     p.add_argument("--fps", type=float, default=30.0, help="Frame sampling rate for hand tracking (default 30)")
     p.add_argument("--flip-handedness", action="store_true", default=False, help="Swap detected L/R hand labels (use if --preview shows hands swapped)")
     p.add_argument(
         "--min-hand-confidence",
         type=float,
-        default=0.5,
-        help="MediaPipe hand-detection confidence threshold (default 0.5, the library default). Lower this "
-        "(e.g. 0.3) if --preview shows a hand frequently missing entirely while clearly visible and playing "
-        "-- a real failure mode observed on monochrome/black-and-white source video.",
+        default=0.3,
+        help="MediaPipe hand-detection confidence threshold (default 0.3; the library's own default of 0.5 "
+        "proved too strict for the typical overhead piano shot -- keys at the bottom of the frame, hands "
+        "only partly visible -- where it silently drops the second hand: measured on a real cover video, "
+        "0.5 saw both hands in 2%% of frames vs 90%% at 0.3). Raise it back toward 0.5 if you get ghost "
+        "hand detections; lower further (e.g. 0.15) if a clearly visible hand still goes missing.",
     )
     p.add_argument("--confidence-threshold", type=float, default=0.0, help="Drop matches below this confidence (default 0.0 = keep all)")
     p.add_argument(
@@ -560,10 +565,24 @@ def _get_or_create_calibration(
             print(f"  reusing saved calibration for this source (headless): {calib_key}")
             return trusted
 
-    from keyboard import select_calibration_frame, interactive_calibrate
+    from keyboard import interactive_calibrate
 
-    print("Scrub to a good frame, then confirm or click white key centers.")
-    frame = select_calibration_frame(video_path)
+    # Get the first non-black frame for CV detection (no interactive window).
+    import cv2 as _cv2
+    _cap = _cv2.VideoCapture(video_path)
+    frame = None
+    _nframes = int(_cap.get(_cv2.CAP_PROP_FRAME_COUNT)) or 10000
+    for _i in range(min(_nframes, 500)):
+        _cap.set(_cv2.CAP_PROP_POS_FRAMES, _i)
+        _ok, _f = _cap.read()
+        if _ok and _cv2.cvtColor(_f, _cv2.COLOR_BGR2GRAY).mean() > 20:
+            frame = _f
+            break
+    _cap.release()
+    if frame is None:
+        _cap2 = _cv2.VideoCapture(video_path)
+        _, frame = _cap2.read()
+        _cap2.release()
 
     seed = None
     if use_cv_calibration:
@@ -583,15 +602,17 @@ def _get_or_create_calibration(
             reason = "camera angle looks different from the saved calibration" if fresh is not None \
                 else "CV detection is low-confidence this time"
             print(f"{reason} for this source -- showing a fresh detection instead of the saved one. "
-                  "Confirm it, or click C/G keys to correct manually.")
+                  "Confirm it, or click C keys to correct manually.")
             seed = fresh
         else:
             seed = fresh
-            print("CV auto-calibration found a confident keyboard fit -- ESC to accept, or click C/G keys to override."
-                  if seed is not None else
-                  "CV auto-calibration didn't find a confident keyboard fit -- click white key centers manually.")
 
-    calib = interactive_calibrate(frame, low_pitch, high_pitch, use_cv_calibration=False, seed_calibration=seed)
+    print("Scrub to a good frame with ←/→ or PgUp/Dn, then click white key centers.")
+    calib = interactive_calibrate(
+        frame, low_pitch, high_pitch,
+        use_cv_calibration=False, seed_calibration=seed,
+        video_path=video_path,
+    )
 
     if use_cv_calibration and calib_key:
         from calibration_store import save_calibration
@@ -694,46 +715,64 @@ def run_preview(video_path: str, calib, midi_data, offset_sec: float, fingertip_
     video_only_path = "preview_video.mp4"
     writer = cv2.VideoWriter(video_only_path, cv2.VideoWriter_fourcc(*"mp4v"), src_fps, (w, h))
 
-    # Build a quick lookup of MIDI notes by nearest video time for overlay.
-    note_video_times = [(n.start_sec + offset_sec, n.pitch) for n in midi_data.notes]
-    note_video_times.sort()
+    from keyboard import pitch_to_white_index as _p2wi
+
+    # Hand colours (BGR), matching the fingertip dots below: L=blue, R=green.
+    HAND_BGR = {"L": (255, 0, 0), "R": (0, 255, 0)}
+    GHOST_BGR = (160, 160, 160)
+    # A note's key must be within this many white keys of a fingertip to count
+    # that hand as playing it (same characteristic scale the matcher uses).
+    NEAR_KEYS = 3.0
+
+    # All MIDI notes as (start_video, end_video, pitch), sorted by start, so we
+    # can sweep an "active" set of currently-sounding notes as the video plays.
+    notes_span = sorted(
+        (n.start_sec + offset_sec, n.start_sec + offset_sec + max(n.duration_sec, 0.0), n.pitch)
+        for n in midi_data.notes
+    )
 
     idx = 0
-    ni = 0
+    nptr = 0          # next note to admit into the active set
+    active: list = []  # [(end_video, pitch), ...] currently sounding
     while True:
         ok, frame = cap.read()
         if not ok:
             break
         frame = undistort_frame(frame, calib.k1)
         t = idx / src_fps
-        # Advance ni to the note whose video time is nearest t (within 0.15s).
-        while ni + 1 < len(note_video_times) and note_video_times[ni + 1][0] <= t:
-            ni += 1
-        current_pitch = None
-        if note_video_times and abs(note_video_times[ni][0] - t) < 0.15:
-            current_pitch = note_video_times[ni][1]
 
-        # Inferred keyboard overlay.  Red ring = MIDI note + hand nearby
-        # (confirms tracking).  Grey ring = MIDI note with no hand detected
-        # nearby (ghost note from transcription or tracking dropout).
+        # Update the active (currently-sounding) set for this frame. A small
+        # lead-in (0.05s) lights the key just before the onset so a fast note
+        # isn't a single-frame flash; notes linger until their release.
+        while nptr < len(notes_span) and notes_span[nptr][0] <= t + 0.05:
+            active.append((notes_span[nptr][1], notes_span[nptr][2]))
+            nptr += 1
+        active = [(end_v, p) for (end_v, p) in active if end_v >= t - 0.03]
+
         tips_at_t = interpolate_fingertips(fingertip_frames, t)
-        hand_near = False
-        if current_pitch is not None and tips_at_t:
-            from keyboard import pitch_to_white_index as _p2wi
-            exp_wi = _p2wi(current_pitch)
-            for _h, _f, tx, ty in tips_at_t:
-                key_x = calib.screen_to_white_index((tx, ty))
-                if abs(key_x - exp_wi) < 3.0:
-                    hand_near = True
-                    break
-        draw_keyboard_overlay(
-            frame, calib,
-            highlight_pitch=current_pitch if hand_near else None,
-            ghost_pitch=current_pitch if (current_pitch is not None and not hand_near) else None,
-        )
+        # Pre-map every fingertip to its keyboard-x once for this frame.
+        tip_keys = [(h, calib.screen_to_white_index((x, y))) for h, _f, x, y in tips_at_t]
 
-        for hand, finger, x, y in interpolate_fingertips(fingertip_frames, t):
-            color = (255, 0, 0) if hand == "L" else (0, 255, 0)
+        # For each sounding note, decide which hand is on its key (nearest
+        # fingertip within NEAR_KEYS) and colour the marker accordingly; grey
+        # if no hand is close (ghost note or tracking dropout).
+        note_markers = []
+        for _end_v, pitch in active:
+            exp_wi = _p2wi(pitch)
+            best_hand, best_d = None, NEAR_KEYS
+            for h, key_x in tip_keys:
+                d = abs(key_x - exp_wi)
+                if d < best_d:
+                    best_d, best_hand = d, h
+            if best_hand is not None:
+                note_markers.append((pitch, HAND_BGR.get(best_hand, GHOST_BGR), True))
+            else:
+                note_markers.append((pitch, GHOST_BGR, False))
+
+        draw_keyboard_overlay(frame, calib, note_markers=note_markers)
+
+        for hand, finger, x, y in tips_at_t:
+            color = HAND_BGR.get(hand, GHOST_BGR)
             cv2.circle(frame, (int(x), int(y)), 6, color, -1)
             cv2.putText(frame, f"{hand}{finger}", (int(x) + 6, int(y)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
@@ -1130,6 +1169,7 @@ def analyze(args: argparse.Namespace) -> dict:
     from reconcile import (
         reconcile_note, confidence_by_window, _frame_times,
         analyze_hand_spread, HAND_SPREAD_WARN_THRESHOLD_KEYS, CLOSE_HANDS_THRESHOLD_KEYS,
+        dual_hand_rate, DUAL_HAND_RATE_MIN, RETRY_HAND_CONFIDENCE,
     )
     from note_release import compute_corrected_ends, ReleaseInput
     if args.render:
@@ -1539,10 +1579,48 @@ def analyze(args: argparse.Namespace) -> dict:
         fingertip_frames = extract_fingertip_frames(
             video_path, fps=args.fps, flip_handedness=args.flip_handedness, k1=calib.k1,
             min_hand_confidence=args.min_hand_confidence, calib=calib,
+            live_frame_path=args.live_frame_path,
         )
         from hands import fix_handedness_continuity
         fix_handedness_continuity(fingertip_frames)
         print(f"  {len(fingertip_frames)} sampled frames")
+
+        # Post-tracking health check: the most damaging silent failure mode is
+        # MediaPipe dropping ONE hand almost entirely (typical overhead piano
+        # shot: keys at the bottom of the frame, hands only partly visible) --
+        # every note then matches the surviving hand's label and the other
+        # hand's notes all come back no-finger-support with ~0 confidence.
+        # Measured on a real cover video: 2% dual-hand at confidence 0.5 vs
+        # 90% at 0.3 and 93% at 0.15. So when the dual-hand rate comes back
+        # low and there is still headroom below the current threshold, retry
+        # the tracking ONCE at RETRY_HAND_CONFIDENCE and keep whichever pass
+        # saw both hands more often.
+        rate = dual_hand_rate(fingertip_frames)
+        print(f"  both hands tracked in {rate * 100:.0f}% of frames")
+        if rate < DUAL_HAND_RATE_MIN and args.min_hand_confidence > RETRY_HAND_CONFIDENCE:
+            print(
+                f"  ⚠ one hand is missing from tracking in most frames -- retrying once at "
+                f"min_hand_confidence={RETRY_HAND_CONFIDENCE} (was {args.min_hand_confidence})..."
+            )
+            retry_frames = extract_fingertip_frames(
+                video_path, fps=args.fps, flip_handedness=args.flip_handedness, k1=calib.k1,
+                min_hand_confidence=RETRY_HAND_CONFIDENCE, calib=calib,
+                live_frame_path=args.live_frame_path,
+            )
+            fix_handedness_continuity(retry_frames)
+            retry_rate = dual_hand_rate(retry_frames)
+            print(f"  retry: both hands tracked in {retry_rate * 100:.0f}% of frames")
+            if retry_rate > rate:
+                fingertip_frames = retry_frames
+                rate = retry_rate
+            else:
+                print("  retry did not improve dual-hand detection -- keeping the first pass")
+        if rate < DUAL_HAND_RATE_MIN:
+            print(
+                "  ⚠ both hands are still rarely tracked together. If this is a two-handed "
+                "performance, expect a poor L/R split and many no-finger-support notes -- "
+                "check --preview, and see the README's 'a hand frequently missing' section."
+            )
 
         # Diagnostic: predicts no-finger-support risk before the (much slower)
         # matching pass runs -- pieces where both hands stay in the same
@@ -1565,6 +1643,40 @@ def analyze(args: argparse.Namespace) -> dict:
             print("Estimating offset using sync method: press-moments (legacy fallback)")
             offset_sec = estimate_offset_from_press_moments(fingertip_frames, midi_data)
             print(f"Auto-estimated offset: {offset_sec:.3f}s (override with --offset)")
+
+        # MIDI-anchored recovery pass: for frames where a hand is missing but a
+        # MIDI note is sounding in a register with no tracked hand, re-run
+        # MediaPipe cropped tightly around that key. Needs the final offset, so
+        # it runs after alignment/press-moment estimation. See hands.py
+        # recover_missing_hands() and the hand-assignment project note.
+        if not args.no_midi_recover:
+            from hands import recover_missing_hands
+
+            rec_stats = recover_missing_hands(
+                video_path, fingertip_frames, calib, midi_data.notes,
+                offset_sec=offset_sec, fps=args.fps, k1=calib.k1,
+                flip_handedness=args.flip_handedness,
+                min_hand_confidence=args.min_hand_confidence,
+            )
+            print(f"  {rec_stats.summary()}")
+            if rec_stats.hands_recovered:
+                fix_handedness_continuity(fingertip_frames)
+                new_rate = dual_hand_rate(fingertip_frames)
+                print(f"  both hands tracked in {new_rate * 100:.0f}% of frames after recovery")
+
+        # Reconstruction pass (stages 3+4): drop physically-impossible fingertip
+        # spikes so interpolation bridges them instead of the matcher trusting a
+        # glitch, protecting real fast presses via MIDI onsets. Runs after the
+        # offset is final (stage 4 needs it) and before preview/matching so both
+        # see the cleaned frames. See reconstruct.py.
+        if not args.no_reconstruct:
+            from reconstruct import reconstruct_frames
+
+            rc_stats = reconstruct_frames(
+                fingertip_frames, calib=calib,
+                midi_notes=midi_data.notes, offset_sec=offset_sec,
+            )
+            print(f"  {rc_stats.summary()}")
 
         if args.preview:
             run_preview(video_path, calib, midi_data, offset_sec, fingertip_frames, args.fps)

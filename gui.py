@@ -21,6 +21,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter.font as tkfont
 from pathlib import Path
@@ -352,14 +353,14 @@ class FingeringGUI:
         self.midi_only_var = tk.BooleanVar(value=False)
         self.out_var = tk.StringVar(value="")
         self.output_dir_var = tk.StringVar(value="")
-        self.fps_var = tk.StringVar(value="20")
+        self.fps_var = tk.StringVar(value="30")
         self.align_var = tk.BooleanVar(value=True)
         self.preview_var = tk.BooleanVar(value=False)
         self.bundle_var = tk.BooleanVar(value=True)
         self.offset_var = tk.StringVar(value="")
         self.calibration_var = tk.StringVar(value=str(HERE / "calibration.json"))
         self.sync_method_var = tk.StringVar(value="audio")
-        self.min_hand_conf_var = tk.StringVar(value="0.5")
+        self.min_hand_conf_var = tk.StringVar(value="0.3")
         self.conf_var = tk.StringVar(value="0.0")
         self.flip_render_hands_var = tk.BooleanVar(value=False)
         # Default ON for now: automatic hue clustering has been observed to
@@ -367,6 +368,11 @@ class FingeringGUI:
         # render_hands.py's assign_hands_for_notes docstring/history) --
         # manual picking is the more reliable path until that's improved.
         self.pick_hand_colors_var = tk.BooleanVar(value=True)
+        self.midi_recover_var = tk.BooleanVar(value=True)
+        self.live_view_var = tk.BooleanVar(value=True)
+        self._live_frame_path = None
+        self._live_photo = None
+        self._live_polling_active = False
         self.onset_threshold_var = tk.StringVar(value="")
         self.min_velocity_var = tk.StringVar(value="0")
         self.min_duration_var = tk.StringVar(value="0")
@@ -772,47 +778,6 @@ class FingeringGUI:
         self.queue_tree.pack(side="left", fill="x", expand=True)
         qt_scroll.pack(side="right", fill="y")
 
-        # Metadata section (shown in single-video mode)
-        self.metadata_section = ttk.Frame(middle_container)
-        self.metadata_section.pack(fill="x")
-
-        meta_sep = ttk.Frame(self.metadata_section, height=2)
-        meta_sep.pack(fill="x", padx=16, pady=(12, 8))
-
-        meta_label = ttk.Label(self.metadata_section, text="Metadata (optional)", style="Muted.TLabel")
-        meta_label.pack(fill="x", padx=16, pady=(0, 6))
-
-        meta_form = ttk.Frame(self.metadata_section)
-        meta_form.pack(fill="x", padx=16, pady=(0, 0))
-        meta_form.columnconfigure(1, weight=1)
-
-        ttk.Label(meta_form, text="Artist:").grid(row=0, column=0, sticky="w", padx=0, pady=4)
-        self.artist_entry = ttk.Entry(meta_form, textvariable=self.artist_var)
-        self.artist_entry.grid(row=0, column=1, sticky="ew", padx=8, pady=4)
-
-        # Autofill assumes "Artist - Song" but many titles are "Song - Artist";
-        # this swaps the two fields with one click. Spans both rows.
-        swap_btn = ttk.Button(meta_form, text="⇄", width=3, command=self._swap_artist_title)
-        swap_btn.grid(row=0, column=2, rowspan=2, padx=(0, 0), pady=4)
-        Tooltip(swap_btn, key="swap_artist_title", text="Swap Artist and Title", prefs=self.prefs)
-
-        ttk.Label(meta_form, text="Title:").grid(row=1, column=0, sticky="w", padx=0, pady=4)
-        self.title_entry = ttk.Entry(meta_form, textvariable=self.title_var)
-        self.title_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=4)
-
-        ttk.Label(meta_form, text="Genre:").grid(row=2, column=0, sticky="w", padx=0, pady=4)
-        self.genre_entry = ttk.Entry(meta_form, textvariable=self.genre_var)
-        self.genre_entry.grid(row=2, column=1, sticky="ew", padx=8, pady=4)
-
-        ttk.Label(meta_form, text="Difficulty:").grid(row=3, column=0, sticky="w", padx=0, pady=4)
-        self.difficulty_combo = ttk.Combobox(
-            meta_form, textvariable=self.difficulty_var, state="readonly",
-            values=["", "easy", "intermediate", "advanced", "expert"], width=20
-        )
-        self.difficulty_combo.grid(row=3, column=1, sticky="ew", padx=8, pady=4)
-
-        ttk.Button(meta_form, text="Auto-fill from video title", command=self._autofill_metadata).grid(row=4, column=1, sticky="e", padx=0, pady=(8, 0))
-
         btn_frame = ttk.Frame(page)
         btn_frame.pack(fill="x", padx=16, pady=(14, 6))
         self.run_button = ttk.Button(btn_frame, text="Run", style="Primary.TButton", command=self._on_run)
@@ -820,12 +785,23 @@ class FingeringGUI:
         self.stop_button = ttk.Button(btn_frame, text="Stop", command=self._on_stop, state="disabled")
         self.stop_button.pack(side="left", padx=8)
         ttk.Button(btn_frame, text="Open output folder", command=self._open_output_folder).pack(side="left", padx=8)
+        self.continue_button = ttk.Button(btn_frame, text="Continue to metadata →",
+                                          command=lambda: self._show_page(4))
+        # Shown only after a successful run (hidden until then)
 
         self.status_var = tk.StringVar(value="Ready.")
         self.status_label = tk.Label(
             page, textvariable=self.status_var, anchor="w", bg=COLOR_BG, fg=COLOR_OK, font=self.default_font,
         )
         self.status_label.pack(fill="x", padx=16, pady=(0, 6))
+
+        # Live tracking frame (shown when live view is enabled during a run)
+        self.live_view_container = ttk.Frame(page)
+        self.live_view_container.pack(fill="x", padx=16, pady=(0, 4))
+        self.live_view_label = tk.Label(
+            self.live_view_container, bg=COLOR_CARD, bd=0, anchor="center", height=0,
+        )
+        self.live_view_label.pack(fill="x")
 
         log_frame = ttk.Frame(page)
         log_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
@@ -1118,21 +1094,29 @@ class FingeringGUI:
         canvas.create_window((0, 0), window=adv, anchor="nw")
         adv.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
-        pad = {"padx": 12, "pady": 7}
+        pad = {"padx": 12, "pady": 5}
         adv.columnconfigure(1, weight=1)
         arow = 0
 
-        ttk.Label(adv, text="Settings", style="Heading.TLabel").grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
+        def _sec(title):
+            nonlocal arow
+            ttk.Separator(adv, orient="horizontal").grid(
+                row=arow, column=0, columnspan=3, sticky="ew", padx=12, pady=(12, 0)
+            )
+            arow += 1
+            ttk.Label(adv, text=title, style="Muted.TLabel").grid(
+                row=arow, column=0, columnspan=3, sticky="w", padx=14, pady=(4, 2)
+            )
+            arow += 1
+
+        # ── Input / Mode ─────────────────────────────────────────────────────
+        ttk.Label(adv, text="Settings", style="Heading.TLabel").grid(
+            row=arow, column=0, columnspan=3, sticky="w", **pad
+        )
         arow += 1
 
-        # Mode overrides -- secondary controls reflecting/overriding whatever
-        # the page-2 mode button picked. Transcribing (from the video's own
-        # audio) is the common case and is ON by default; this checkbox is
-        # phrased as the opt-out -- "I already have a matching MIDI" -- so
-        # checking it is what turns transcription OFF. onvalue/offvalue are
-        # flipped (rather than a second variable) so transcribe_var itself
-        # keeps its normal True-means-transcribing meaning everywhere else
-        # (_build_argv, _on_render_toggled, etc.).
+        # Transcribing is the default; this checkbox is phrased as the opt-out
+        # so that transcribe_var keeps its True-means-transcribing meaning.
         supply_midi_check = ttk.Checkbutton(
             adv, text="Supply a MIDI file (exact performance of this video, extracted elsewhere)",
             variable=self.transcribe_var, onvalue=False, offvalue=True,
@@ -1149,15 +1133,7 @@ class FingeringGUI:
         )
         arow += 1
 
-        self.render_check = ttk.Checkbutton(
-            adv, text="Synthesia-style render (lit-key colour -> hand assignment)",
-            variable=self.render_var, command=self._on_render_toggled,
-        )
-        self.render_check.grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
-        arow += 1
-
-        # Only shown once "Supply a MIDI file" above is checked -- see
-        # _refresh_midi_visibility, called after this popover is built.
+        # Only shown when "Supply a MIDI file" is checked.
         self.midi_settings_row = ttk.Frame(adv)
         self.midi_settings_row.grid(row=arow, column=0, columnspan=3, sticky="ew", padx=0, pady=0)
         self.midi_settings_row.columnconfigure(1, weight=1)
@@ -1168,58 +1144,27 @@ class FingeringGUI:
         self.midi_browse_button_settings.grid(row=0, column=2, **pad)
         arow += 1
 
+        self.render_check = ttk.Checkbutton(
+            adv, text="Synthesia-style render (lit-key colour → hand assignment, no hand tracking)",
+            variable=self.render_var, command=self._on_render_toggled,
+        )
+        self.render_check.grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
+        arow += 1
+
+        # ── Sync & Alignment ─────────────────────────────────────────────────
+        _sec("SYNC & ALIGNMENT")
+
         ttk.Label(adv, text="FPS:").grid(row=arow, column=0, sticky="w", **pad)
         ttk.Entry(adv, textvariable=self.fps_var, width=12).grid(row=arow, column=1, sticky="w", **pad)
         arow += 1
 
-        self.align_check = ttk.Checkbutton(
-            adv, text="Align video/MIDI before analysis (watch + hear, tune the offset)",
-            variable=self.align_var,
-        )
-        self.align_check.grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
-        arow += 1
-
-        ttk.Checkbutton(
-            adv, text="Render preview video (with MIDI audio) after analysis", variable=self.preview_var,
-        ).grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
-        arow += 1
-
-        ttk.Checkbutton(
-            adv, text="Also write a .symple bundle (MIDI + fingering, one-step load in Symplethesia)",
-            variable=self.bundle_var,
-        ).grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
-        arow += 1
-
-        ttk.Label(adv, text="Output JSON:").grid(row=arow, column=0, sticky="w", **pad)
-        ttk.Entry(adv, textvariable=self.out_var).grid(row=arow, column=1, sticky="ew", **pad)
-        ttk.Button(adv, text="Browse...", command=self._browse_out).grid(row=arow, column=2, **pad)
-        arow += 1
-
-        ttk.Label(adv, text="Output Directory:").grid(row=arow, column=0, sticky="w", **pad)
-        ttk.Entry(adv, textvariable=self.output_dir_var).grid(row=arow, column=1, sticky="ew", **pad)
-        ttk.Button(adv, text="Browse...", command=self._browse_output_dir).grid(row=arow, column=2, **pad)
-        arow += 1
-
         offset_label = ttk.Label(adv, text="Offset (sec, blank = auto):")
         offset_label.grid(row=arow, column=0, sticky="w", **pad)
-        offset_entry = ttk.Entry(adv, textvariable=self.offset_var, width=12)
-        offset_entry.grid(row=arow, column=1, sticky="w", **pad)
+        ttk.Entry(adv, textvariable=self.offset_var, width=12).grid(row=arow, column=1, sticky="w", **pad)
         Tooltip(
             offset_label, key="offset",
             text="Manual video/MIDI offset in seconds (video_time = midi_time + offset). "
             "Leave blank to auto-estimate from the audio.",
-            prefs=self.prefs,
-        )
-        arow += 1
-
-        calib_label = ttk.Label(adv, text="Calibration file:")
-        calib_label.grid(row=arow, column=0, sticky="w", **pad)
-        ttk.Entry(adv, textvariable=self.calibration_var).grid(row=arow, column=1, sticky="ew", **pad)
-        ttk.Button(adv, text="Browse...", command=self._browse_calibration).grid(row=arow, column=2, **pad)
-        Tooltip(
-            calib_label, key="calibration_file",
-            text="Currently a compatibility placeholder -- calibration is never loaded from or saved "
-            "to disk; every run recalibrates the keyboard position interactively.",
             prefs=self.prefs,
         )
         arow += 1
@@ -1240,14 +1185,25 @@ class FingeringGUI:
         )
         arow += 1
 
-        hand_conf_label = ttk.Label(adv, text="Min hand confidence (0-1):")
+        self.align_check = ttk.Checkbutton(
+            adv, text="Align video/MIDI before analysis (watch + hear, tune the offset)",
+            variable=self.align_var,
+        )
+        self.align_check.grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
+        arow += 1
+
+        # ── Hand Tracking ─────────────────────────────────────────────────────
+        _sec("HAND TRACKING")
+
+        hand_conf_label = ttk.Label(adv, text="Min hand confidence (0–1):")
         hand_conf_label.grid(row=arow, column=0, sticky="w", **pad)
         ttk.Entry(adv, textvariable=self.min_hand_conf_var, width=12).grid(row=arow, column=1, sticky="w", **pad)
         Tooltip(
             hand_conf_label, key="min_hand_confidence",
-            text="MediaPipe hand-detection confidence threshold (default 0.5). Lower this (e.g. 0.3) "
-            "if a hand frequently goes undetected while clearly visible and playing -- a known issue "
-            "on monochrome/black-and-white source video.",
+            text="MediaPipe hand-detection confidence threshold (default 0.3 -- deliberately below the "
+            "library's 0.5, which drops the second hand on typical overhead piano shots). Lower further "
+            "(e.g. 0.15) if a clearly visible hand still goes undetected; raise toward 0.5 if ghost "
+            "hands appear.",
             prefs=self.prefs,
         )
         arow += 1
@@ -1256,15 +1212,39 @@ class FingeringGUI:
         ttk.Entry(adv, textvariable=self.conf_var, width=12).grid(row=arow, column=1, sticky="w", **pad)
         arow += 1
 
+        midi_recover_check = ttk.Checkbutton(
+            adv, text="MIDI-anchored hand recovery (re-run MediaPipe where a note sounds but no hand was tracked)",
+            variable=self.midi_recover_var,
+        )
+        midi_recover_check.grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
+        Tooltip(
+            midi_recover_check, key="midi_recover",
+            text="After tracking, for any frame where a hand is missing but a MIDI note is sounding in a "
+            "register with no tracked hand, re-run MediaPipe cropped tightly around that key to recover the "
+            "missing hand. Uses the played note as ground truth for where a hand must be -- improves the L/R "
+            "hand split on videos where one hand is frequently dropped. On by default; uncheck to skip it.",
+            prefs=self.prefs,
+        )
+        arow += 1
+
+        ttk.Checkbutton(
+            adv, text="Live tracking view (show hand detection in the run screen while processing)",
+            variable=self.live_view_var,
+        ).grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
+        arow += 1
+
+        # ── Render Mode ───────────────────────────────────────────────────────
+        _sec("RENDER MODE  (Synthesia-style only)")
+
         self.flip_render_hands_check = ttk.Checkbutton(
-            adv, text="Flip render hand colours (Render mode only -- use if L/R look swapped)",
+            adv, text="Flip render hand colours (use if L/R look swapped)",
             variable=self.flip_render_hands_var,
         )
         self.flip_render_hands_check.grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
         arow += 1
 
         pick_colors_check = ttk.Checkbutton(
-            adv, text="Pick hand colours manually (Render mode only -- click-sample instead of auto-clustering)",
+            adv, text="Pick hand colours manually (click-sample instead of auto-clustering)",
             variable=self.pick_hand_colors_var,
         )
         pick_colors_check.grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
@@ -1279,10 +1259,13 @@ class FingeringGUI:
         )
         arow += 1
 
+        # ── Transcription ─────────────────────────────────────────────────────
+        _sec("TRANSCRIPTION  (auto-MIDI from audio)")
+
         self.transcribe_opts_frame = ttk.Frame(adv)
         self.transcribe_opts_frame.grid(row=arow, column=0, columnspan=3, sticky="ew", padx=12)
         arow += 1
-        ghost_label = ttk.Label(self.transcribe_opts_frame, text="Ghost-note filtering (Transcribe only)", style="Muted.TLabel")
+        ghost_label = ttk.Label(self.transcribe_opts_frame, text="Ghost-note filtering", style="Muted.TLabel")
         ghost_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(4, 4))
         Tooltip(
             ghost_label, key="ghost_notes",
@@ -1292,29 +1275,28 @@ class FingeringGUI:
             prefs=self.prefs,
         )
         ttk.Label(self.transcribe_opts_frame, text="Onset threshold (blank = default 0.3):").grid(
-            row=1, column=0, sticky="w", pady=(0, 6)
+            row=1, column=0, sticky="w", pady=(0, 5)
         )
         ttk.Entry(self.transcribe_opts_frame, textvariable=self.onset_threshold_var, width=10).grid(
-            row=1, column=1, sticky="w", padx=(7, 0), pady=(0, 6)
+            row=1, column=1, sticky="w", padx=(7, 0), pady=(0, 5)
         )
-        ttk.Label(self.transcribe_opts_frame, text="Min velocity (0-127, 0 = off):").grid(
-            row=2, column=0, sticky="w", pady=(0, 6)
+        ttk.Label(self.transcribe_opts_frame, text="Min velocity (0–127, 0 = off):").grid(
+            row=2, column=0, sticky="w", pady=(0, 5)
         )
         ttk.Entry(self.transcribe_opts_frame, textvariable=self.min_velocity_var, width=10).grid(
-            row=2, column=1, sticky="w", padx=(7, 0), pady=(0, 6)
+            row=2, column=1, sticky="w", padx=(7, 0), pady=(0, 5)
         )
         ttk.Label(self.transcribe_opts_frame, text="Min duration sec (0 = off):").grid(
-            row=3, column=0, sticky="w", pady=(0, 6)
+            row=3, column=0, sticky="w", pady=(0, 5)
         )
         ttk.Entry(self.transcribe_opts_frame, textvariable=self.min_duration_var, width=10).grid(
-            row=3, column=1, sticky="w", padx=(7, 0), pady=(0, 6)
+            row=3, column=1, sticky="w", padx=(7, 0), pady=(0, 5)
         )
-
         no_gpu_check = ttk.Checkbutton(
             self.transcribe_opts_frame, text="Force CPU (disable GPU acceleration)",
             variable=self.no_gpu_var,
         )
-        no_gpu_check.grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        no_gpu_check.grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 5))
         Tooltip(
             no_gpu_check, key="no_gpu",
             text="By default transcription uses a CUDA GPU automatically if one is available -- this "
@@ -1322,14 +1304,13 @@ class FingeringGUI:
             "issue; leave unchecked to get the (usually much faster) GPU path when you have one.",
             prefs=self.prefs,
         )
-
         if os.name == "nt":
             gpu_torch_check = ttk.Checkbutton(
                 self.transcribe_opts_frame,
                 text="Use NVIDIA GPU (installs CUDA PyTorch, ~2.5 GB extra download)",
                 variable=self.gpu_torch_var,
             )
-            gpu_torch_check.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 6))
+            gpu_torch_check.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 5))
             Tooltip(
                 gpu_torch_check, key="gpu_torch_windows",
                 text="Only relevant the first time transcription support installs itself. Plain PyPI "
@@ -1340,6 +1321,45 @@ class FingeringGUI:
                 "run is never left broken -- you can retry the GPU install later.",
                 prefs=self.prefs,
             )
+
+        # ── Output ────────────────────────────────────────────────────────────
+        _sec("OUTPUT")
+
+        ttk.Checkbutton(
+            adv, text="Render preview video (with MIDI audio) after analysis", variable=self.preview_var,
+        ).grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
+        arow += 1
+
+        ttk.Checkbutton(
+            adv, text="Write a .symple bundle (MIDI + fingering, one-step load in Symplethesia)",
+            variable=self.bundle_var,
+        ).grid(row=arow, column=0, columnspan=3, sticky="w", **pad)
+        arow += 1
+
+        ttk.Label(adv, text="Output JSON:").grid(row=arow, column=0, sticky="w", **pad)
+        ttk.Entry(adv, textvariable=self.out_var).grid(row=arow, column=1, sticky="ew", **pad)
+        ttk.Button(adv, text="Browse...", command=self._browse_out).grid(row=arow, column=2, **pad)
+        arow += 1
+
+        ttk.Label(adv, text="Output directory:").grid(row=arow, column=0, sticky="w", **pad)
+        ttk.Entry(adv, textvariable=self.output_dir_var).grid(row=arow, column=1, sticky="ew", **pad)
+        ttk.Button(adv, text="Browse...", command=self._browse_output_dir).grid(row=arow, column=2, **pad)
+        arow += 1
+
+        # ── Advanced ──────────────────────────────────────────────────────────
+        _sec("ADVANCED")
+
+        calib_label = ttk.Label(adv, text="Calibration file:")
+        calib_label.grid(row=arow, column=0, sticky="w", **pad)
+        ttk.Entry(adv, textvariable=self.calibration_var).grid(row=arow, column=1, sticky="ew", **pad)
+        ttk.Button(adv, text="Browse...", command=self._browse_calibration).grid(row=arow, column=2, **pad)
+        Tooltip(
+            calib_label, key="calibration_file",
+            text="Currently a compatibility placeholder -- calibration is never loaded from or saved "
+            "to disk; every run recalibrates the keyboard position interactively.",
+            prefs=self.prefs,
+        )
+        arow += 1
 
     # -- browse / drop handlers ---------------------------------------------
     def _browse_video(self):
@@ -1581,6 +1601,7 @@ class FingeringGUI:
 
     # -- run / stop -------------------------------------------------------------
     def _build_argv(self):
+        self._live_frame_path = None  # reset each run
         if self.batch_mode_var.get():
             return self._build_batch_argv()
         argv = [
@@ -1652,6 +1673,13 @@ class FingeringGUI:
                 argv.append("--flip-render-hands")
             if self.pick_hand_colors_var.get():
                 argv.append("--pick-hand-colors")
+
+        if not self.midi_recover_var.get():
+            argv.append("--no-midi-recover")
+
+        if self.live_view_var.get() and _HAS_PIL:
+            self._live_frame_path = tempfile.mktemp(suffix=".jpg", prefix="smape_live_")
+            argv += ["--live-frame-path", self._live_frame_path]
 
         return argv
 
@@ -1733,6 +1761,10 @@ class FingeringGUI:
         self._set_status("Running...", error=False)
         self.run_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
+        self.continue_button.pack_forget()
+        if self._live_frame_path:
+            self._live_polling_active = True
+            self._poll_live_frame()
 
         def run_one(cmd):
             self.log_queue.put(("line", f"$ {' '.join(cmd)}\n\n"))
@@ -1845,6 +1877,15 @@ class FingeringGUI:
         self.root.after(100, self._poll_log_queue)
 
     def _on_process_done(self, returncode):
+        self._live_polling_active = False
+        # Clean up the temp frame file (keep last frame in the label until next run)
+        if self._live_frame_path and os.path.exists(self._live_frame_path):
+            try:
+                os.remove(self._live_frame_path)
+            except OSError:
+                pass
+        self._live_frame_path = None
+
         self.run_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
         self.proc = None
@@ -1854,7 +1895,6 @@ class FingeringGUI:
             else:
                 self._set_status("Batch finished with failures — see log above for details.", error=True)
         elif returncode == 0:
-            # Go to dedicated metadata page so user can review/save metadata
             self._autofill_metadata()
             self.p4_status_var.set(
                 f"Bundle ready: {Path(self._last_run_bundle).name}"
@@ -1862,7 +1902,9 @@ class FingeringGUI:
                 else "Run completed — fill in metadata and save to bundle."
             )
             self.p4_status_label.configure(fg=COLOR_OK)
-            self._show_page(4)
+            # Stay on the run page so the user can review the last tracking frame
+            self._set_status("Done — review tracking above, then continue to metadata.", error=False)
+            self.continue_button.pack(side="right")
         else:
             self._set_status(f"Failed (exit code {returncode}) — see log above for details.", error=True)
 
@@ -1905,11 +1947,9 @@ class FingeringGUI:
 
     def _refresh_batch_progress_visibility(self):
         if self.batch_mode_var.get():
-            self.metadata_section.pack_forget()
             self.batch_progress_frame.pack(fill="x")
         else:
             self.batch_progress_frame.pack_forget()
-            self.metadata_section.pack(fill="x")
 
     def _init_batch_progress(self):
         for item in self.queue_tree.get_children():
@@ -1978,6 +2018,8 @@ class FingeringGUI:
             argv.append("--midi-only")
         if self.no_gpu_var.get():
             argv.append("--no-gpu")
+        if not self.midi_recover_var.get():
+            argv.append("--no-midi-recover")
         onset_threshold = self.onset_threshold_var.get().strip()
         if onset_threshold:
             argv += ["--onset-threshold", onset_threshold]
@@ -1985,15 +2027,44 @@ class FingeringGUI:
 
     # -- log / status helpers -----------------------------------------------
     def _log(self, text):
+        # Only auto-scroll when the user is already at (or near) the bottom,
+        # so manually scrolling up to read earlier output isn't interrupted.
+        at_bottom = self.log_text.yview()[1] >= 0.98
         self.log_text.configure(state="normal")
         self.log_text.insert("end", text)
-        self.log_text.see("end")
+        if at_bottom:
+            self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
     def _clear_log(self):
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
+        self.live_view_label.configure(image="", height=0)
+        self._live_photo = None
+
+    # -- live tracking frame polling ----------------------------------------
+    def _poll_live_frame(self):
+        if not self._live_polling_active:
+            return
+        path = self._live_frame_path
+        if path and os.path.exists(path) and _HAS_PIL:
+            try:
+                img = Image.open(path)
+                img.load()  # force read before file may be overwritten
+                avail_w = max(200, self.live_view_label.winfo_width())
+                max_h = 220
+                scale = min(avail_w / img.width, max_h / img.height, 1.0)
+                new_w = max(1, int(img.width * scale))
+                new_h = max(1, int(img.height * scale))
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                self._live_photo = tk.PhotoImage(data=buf.getvalue())
+                self.live_view_label.configure(image=self._live_photo, height=new_h)
+            except Exception:
+                pass
+        self.root.after(150, self._poll_live_frame)
 
     def _set_status(self, text, error):
         self.status_var.set(text)

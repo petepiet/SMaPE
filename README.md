@@ -185,9 +185,13 @@ Full CLI:
 --no-bundle               don't write the .symple bundle (MIDI + fingering JSON) alongside --out
 --preview                 also render preview.mp4 (keyboard overlay + fingertips + MIDI audio)
 --fps N                   frame sampling rate for hand tracking (default 30)
---min-hand-confidence F   MediaPipe hand-detection confidence threshold, 0..1 (default 0.5); lower (e.g. 0.3)
-                          if a hand frequently goes undetected -- see "Hand tracking" note below
+--min-hand-confidence F   MediaPipe hand-detection confidence threshold, 0..1 (default 0.3; lower, e.g. 0.15,
+                          if a hand frequently goes undetected) -- see "Hand tracking" note below
 --confidence-threshold F  drop matches below this confidence, 0..1 (default 0.0 = keep all)
+--no-midi-recover         skip the MIDI-anchored recovery pass (re-runs MediaPipe cropped around keys where
+                          a note sounds but no hand was tracked); on by default
+--no-reconstruct          skip the kinematic outlier-removal pass that drops teleporting fingertip glitches
+                          before matching; on by default
 --flip-handedness         swap detected L/R hand labels (see "Hand tracking" note below)
 --low-pitch N             (optional) leftmost overlay key; default auto from MIDI
 --high-pitch N            (optional) rightmost overlay key; default auto from MIDI
@@ -220,16 +224,25 @@ check by extracting a few frames from `preview.mp4` at the low-confidence
 timestamps (`ffmpeg -ss T -i preview.mp4 -frames:v 1 out.jpg`) and looking
 for whether both hands have colored fingertip dots.
 
-**Likely cause on monochrome/black-and-white source video:** MediaPipe's
+**Likely causes:** the typical overhead piano shot itself (keys at the
+bottom of the frame, hands only partly visible -- measured on a real cover
+video: both hands seen in just 2% of frames at threshold 0.5, vs 90% at 0.3
+and 93% at 0.15), and monochrome/black-and-white source video (MediaPipe's
 hand landmark model is trained mostly on color imagery and partly relies on
-skin-tone cues that desaturated footage lacks, making detection less
-confident and more prone to dropping a hand entirely for stretches.
+skin-tone cues that desaturated footage lacks).
 
-**Fix:** lower `--min-hand-confidence` (default 0.5, the library's own
-default) -- e.g. `--min-hand-confidence 0.3`. This relaxes both
+**Built-in mitigation:** the default `--min-hand-confidence` is 0.3
+(deliberately below the library's own 0.5, for exactly the overhead-shot
+reason above). After tracking, the tool also measures the fraction of frames
+where BOTH hands were seen, prints it, and -- when it comes back under 20%
+with headroom left -- automatically retries the tracking once at 0.15,
+keeping whichever pass saw both hands more often.
+
+**Manual fix if it still misses a hand:** lower `--min-hand-confidence`
+further (e.g. `--min-hand-confidence 0.15`). This relaxes both
 `min_hand_detection_confidence` and `min_hand_presence_confidence`, trading
 a higher false-detection rate for fewer missed real hands. Available in the
-GUI too.
+GUI too. Raise it back toward 0.5 if you see ghost hand detections instead.
 
 The tool prints a summary when done:
 

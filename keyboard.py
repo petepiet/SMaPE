@@ -272,7 +272,8 @@ def _calib_u_to_screen(calib, u: float):
     return float(pt[0]), float(pt[1])
 
 
-def draw_keyboard_overlay(frame, calib, highlight_pitch=None, ghost_pitch=None, height_px: int = 22) -> None:
+def draw_keyboard_overlay(frame, calib, highlight_pitch=None, ghost_pitch=None,
+                          note_markers=None, height_px: int = 22) -> None:
     """Draw the inferred piano keyboard over ``frame`` (a cv2 BGR image,
     mutated in place): white-key separator ticks, black-key marks, and a note
     label at every C, all positioned by the calibration. Lets the mapping be
@@ -281,8 +282,18 @@ def draw_keyboard_overlay(frame, calib, highlight_pitch=None, ghost_pitch=None, 
 
     ``highlight_pitch`` draws a red ring (a hand was detected near this key).
     ``ghost_pitch`` draws a grey ring (MIDI says this note is sounding but no
-    hand was detected nearby — ghost note or tracking dropout). Any projection
-    failure is swallowed so overlay drawing never crashes the caller."""
+    hand was detected nearby — ghost note or tracking dropout).
+
+    ``note_markers`` draws a ring per entry for EVERY currently-sounding note,
+    coloured by which hand the tool assigned it (so the L/R split — the whole
+    point for Synthesia-style per-hand practice — is eyeball-verifiable). It is
+    a list of ``(pitch, bgr_color, filled)`` tuples: ``filled`` draws a solid
+    dot (hand confidently on the key), otherwise a hollow ring. Drawn on top of
+    the single-pitch highlight/ghost rings above, which are kept for the
+    calibration overlay's use.
+
+    Any projection failure is swallowed so overlay drawing never crashes the
+    caller."""
     import cv2  # lazy import
 
     try:
@@ -350,6 +361,14 @@ def draw_keyboard_overlay(frame, calib, highlight_pitch=None, ghost_pitch=None, 
         if ghost_pitch is not None:
             x, y = wi_to_screen(pitch_to_white_index(ghost_pitch))
             cv2.circle(frame, (x, y), 12, (160, 160, 160), 2, cv2.LINE_AA)
+        if note_markers:
+            for pitch, color, filled in note_markers:
+                x, y = wi_to_screen(pitch_to_white_index(pitch))
+                if filled:
+                    cv2.circle(frame, (x, y), 11, color, -1, cv2.LINE_AA)
+                    cv2.circle(frame, (x, y), 11, (255, 255, 255), 1, cv2.LINE_AA)
+                else:
+                    cv2.circle(frame, (x, y), 11, color, 2, cv2.LINE_AA)
     except Exception:
         pass
 
@@ -746,35 +765,41 @@ def select_calibration_frame(video_path: str) -> np.ndarray:
 def interactive_calibrate(
     reference_frame, low_pitch: int, high_pitch: int,
     use_cv_calibration: bool = True, seed_calibration: Optional["Calibration"] = None,
+    video_path: Optional[str] = None,
 ) -> Calibration:
     """Let the user click the centers of white keys across the playable
-    keyboard area (left to right). For each click, the user specifies which
-    white key it is (via a small Tkinter key-picker popup), and the system
-    accumulates points into a list of `CalibPoint`. Once 4+ points are
-    placed, the overlay shows a live least-squares-fitted homography; the
-    user presses ESC to finish once satisfied (8+ points recommended for a
-    good fit across severe perspective/lens distortion).
+    keyboard area (left to right). For each click the user specifies which
+    C note it is via the inline button strip at the bottom of the window,
+    then presses ESC when satisfied (4+ points required, 8+ recommended).
 
-    An overlay is pre-seeded (shown immediately; ESC alone accepts it -- no
-    clicking needed) from one of two sources:
-      - ``seed_calibration``, if the caller already resolved one (Phase B:
-        extract_fingering.py's per-source persistence + agreement check
-        decides between a saved calibration and a fresh CV read before
-        calling this function, and prints its own reasoning); or
-      - otherwise, when ``use_cv_calibration`` (default on), this function
-        runs the CV black-key detector (keyboard_cv.detect_keyboard_
-        calibration) itself on the reference frame.
-    Clicking A/C/G keys always overrides either seed: once >=3 points are
-    placed, the row is refit from those clicks instead, exactly as in
-    pure-manual mode. Pressing 'b' clears any clicks and reverts to the
-    seed overlay. No seed (failed/low-confidence detection, or none given)
-    falls back to requiring manual clicks, same as before this feature
-    existed.
+    When ``video_path`` is given the same window doubles as a frame scrubber:
+    LEFT/RIGHT arrows (±10 frames) and PGUP/PGDN (±150 frames) navigate the
+    video while no calibration point is selected. The piano overlay and any
+    already-placed points follow the same pixel grid throughout because all
+    frames of a video share the same resolution.
 
-    Lazy-imports cv2 -- only called when actually calibrating from live
-    video, never from selftest.py.
+    The overlay is pre-seeded from one of two sources:
+      - ``seed_calibration`` (caller-supplied); or
+      - the CV black-key detector run on ``reference_frame`` when
+        ``use_cv_calibration`` is True.
+    Manual C-note clicks override the seed once >=3 points are placed.
+    Press 'b' to discard manual clicks and revert to the seed overlay.
+
+    Lazy-imports cv2 — never called from selftest.py.
     """
     import cv2  # lazy import
+
+    # --- optional video scrubber -------------------------------------------
+    video_cap = None
+    total_video_frames = 0
+    current_video_idx = [0]   # list so inner functions can rebind it
+    if video_path is not None:
+        video_cap = cv2.VideoCapture(video_path)
+        if not video_cap.isOpened():
+            print(f"Warning: could not open {video_path} for scrubbing; using static frame.")
+            video_cap = None
+        else:
+            total_video_frames = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 10000
 
     auto_calib = seed_calibration
     if auto_calib is None and use_cv_calibration:
@@ -783,29 +808,30 @@ def interactive_calibrate(
             auto_calib = detect_keyboard_calibration(reference_frame, low_pitch, high_pitch)
         except Exception:
             auto_calib = None
-        print("CV auto-calibration found a confident keyboard fit -- ESC to accept, or click A/C/G keys to override."
+        print("CV auto-calibration found a confident keyboard fit -- ESC to accept, or click C keys to override."
               if auto_calib is not None else
               "CV auto-calibration didn't find a confident keyboard fit -- click white key centers manually.")
 
-    # Guard against the window manager / OpenCV backend silently displaying
-    # the window at a different pixel size than `reference_frame`'s true
-    # array resolution (e.g. a 4K frame shown shrunk to fit the screen). If
-    # that happens, a click at a visually-correct spot lands at the wrong
-    # pixel in the underlying array -- producing exactly the "roughly right
-    # spacing but systematically offset" symptom this feature exists to fix.
-    # Rather than trust cv2/Qt/GTK's window-resize-to-callback-coordinate
-    # mapping (backend/version-specific), we do our own explicit, controlled
-    # downscale of the array before showing it, and our own explicit upscale
-    # of the final points before returning -- so the window is always
-    # AUTOSIZE-created and pixel-exact to whatever array we hand it, and no
-    # window-manager-driven resize ever occurs.
-    MAX_DISPLAY_DIM = 2450
+    # Scale the display frame so it fits within 90% of the actual screen size.
+    # Using tkinter (already a dependency) to read true screen dimensions is
+    # more reliable than any hardcoded constant — a 2450-pixel cap overflows
+    # on 1080p monitors while being too small on 4K ones.
+    try:
+        import tkinter as _tk
+        _r = _tk.Tk(); _r.withdraw()
+        _sw, _sh = _r.winfo_screenwidth(), _r.winfo_screenheight()
+        _r.destroy()
+        MAX_DISPLAY_W = int(_sw * 0.90)
+        MAX_DISPLAY_H = int(_sh * 0.90)
+    except Exception:
+        MAX_DISPLAY_W = MAX_DISPLAY_H = 1600
+
     h, w = reference_frame.shape[:2]
-    scale = min(1.0, MAX_DISPLAY_DIM / max(w, h))
+    scale = min(1.0, MAX_DISPLAY_W / w, MAX_DISPLAY_H / h)
     if scale < 1.0:
         print(
-            f"Video frame is {w}x{h}, displaying scaled to fit your screen "
-            f"(points will be mapped back to full resolution automatically)."
+            f"Video frame is {w}x{h}, displaying at {int(w*scale)}x{int(h*scale)} "
+            f"to fit your screen (points mapped back to full resolution automatically)."
         )
 
     # The auto row is fit in FULL-resolution pixel space (detected straight off
@@ -826,15 +852,27 @@ def interactive_calibrate(
     octave_offset = 0  # shift entire keyboard overlay up/down by octaves (</>)
     overlay_rotation = 0.0  # tick rotation in degrees from vertical ([/] keys), for angled cameras
     window = "Calibrate: click white key centers (left to right), specify pitch, press ESC to finish"
+    # Inline C-note picker state: set when user has clicked a key and we're
+    # waiting for them to pick which C note it is via the on-frame button strip.
+    pending_click = None   # (click_x, click_y) | None
+    picker_rects: list = []  # [(x1, y1, x2, y2, pitch), ...]
+    last_c_pitch = [None]  # last confirmed C-note pitch for auto-advance
 
     def _rebuild_display_frame():
-        """Apply display-scale-safety downscale (no lens correction for
-        multi-point -- the fitted homography itself absorbs mild lens
-        distortion when enough points are spread across the keyboard)."""
+        """Return the current display frame, reading from the video if scrubbing
+        is active, otherwise falling back to the static reference frame.
+        Always downscales to fit within MAX_DISPLAY_DIM so AUTOSIZE windows
+        stay pixel-exact and click coordinates need no remapping."""
+        src = reference_frame
+        if video_cap is not None:
+            video_cap.set(cv2.CAP_PROP_POS_FRAMES, current_video_idx[0])
+            ok, vfrm = video_cap.read()
+            if ok:
+                src = vfrm
         if scale < 1.0:
-            uh, uw = reference_frame.shape[:2]
-            return cv2.resize(reference_frame, (int(round(uw * scale)), int(round(uh * scale))))
-        return reference_frame.copy()
+            sh, sw = src.shape[:2]
+            return cv2.resize(src, (int(round(sw * scale)), int(round(sh * scale))))
+        return src.copy()
 
     display_frame = _rebuild_display_frame()
     frame_h, frame_w = display_frame.shape[:2]
@@ -874,103 +912,90 @@ def interactive_calibrate(
                 best, best_d = i, d
         return best
 
+    def _build_picker_rects():
+        """(Re)compute button rects for the inline C-note selection strip at
+        the bottom of the frame. Call once after frame dimensions are known."""
+        nonlocal picker_rects
+        c_pitches = [12 * (o + 1) for o in range(8) if 12 * (o + 1) <= high_pitch]
+        n = len(c_pitches)
+        if n == 0:
+            picker_rects = []
+            return
+        btn_w, btn_h = 58, 36
+        gap = 10
+        total_w = n * btn_w + (n - 1) * gap
+        x0 = max(8, (frame_w - total_w) // 2)
+        bar_y = frame_h - 50
+        picker_rects = [
+            (x0 + i * (btn_w + gap), bar_y,
+             x0 + i * (btn_w + gap) + btn_w, bar_y + btn_h,
+             pitch)
+            for i, pitch in enumerate(c_pitches)
+        ]
+
+    def _confirm_pending(pitch: int):
+        """Apply the pending click with the chosen pitch."""
+        nonlocal pending_click, selected_idx
+        if pending_click is None:
+            return
+        cx, cy = pending_click
+        pending_click = None
+        try:
+            pt = CalibPoint(pixel_xy=(float(cx), float(cy)), pitch=pitch)
+            active = _get_active_points()
+            active.append(pt)
+            selected_idx = len(active) - 1
+            last_c_pitch[0] = pitch
+        except ValueError as e:
+            print(f"Invalid key selection: {e}")
+
     def on_click(event, x, y, flags, userdata):  # noqa: ANN001
-        nonlocal selected_idx, dragging_idx, mouse_pos
+        nonlocal selected_idx, dragging_idx, mouse_pos, pending_click
+        mouse_pos = (x, y)
+
         if event == cv2.EVENT_LBUTTONDOWN:
-            # Grab the nearest existing point to drag it; else place a new one.
+            # While the inline picker is visible, clicks land on its buttons.
+            if pending_click is not None:
+                for (x1, y1, x2, y2, pitch) in picker_rects:
+                    if x1 <= x <= x2 and y1 <= y <= y2:
+                        _confirm_pending(pitch)
+                        return
+                # Click outside the buttons: auto-confirm next octave if available.
+                if last_c_pitch[0] is not None:
+                    auto = last_c_pitch[0] + 12
+                    valid = [p for (_, _, _, _, p) in picker_rects]
+                    if auto in valid:
+                        _confirm_pending(auto)
+                        return
+                pending_click = None
+                return
+            # Normal mode: grab an existing point to drag it, or start a new one.
             hit = _nearest_point(x, y)
             if hit is not None:
                 dragging_idx = hit
                 selected_idx = hit
                 return
-            _open_key_picker(x, y)
+            # Start inline C-note selection for this click position.
+            pending_click = (x, y)
+
         elif event == cv2.EVENT_RBUTTONDOWN:
-            # Right-click deletes the nearest point (remove a misplaced one).
+            pending_click = None  # cancel any in-progress selection
             hit = _nearest_point(x, y)
             if hit is not None:
                 active = _get_active_points()
                 active.pop(hit)
                 selected_idx = (len(active) - 1) if active else None
+
         elif event == cv2.EVENT_MOUSEMOVE:
-            mouse_pos = (x, y)
             if dragging_idx is not None:
                 cx = min(max(x, 0), frame_w - 1)
                 cy = min(max(y, 0), frame_h - 1)
                 active = _get_active_points()
                 active[dragging_idx].pixel_xy = (cx, cy)
+
         elif event == cv2.EVENT_LBUTTONUP:
             if dragging_idx is not None:
                 dragging_idx = None
-
-    def _open_key_picker(click_x: float, click_y: float):
-        """Pop up A / C / G buttons; octave is inferred from click position."""
-        nonlocal selected_idx
-        import tkinter as tk
-        from tkinter import ttk
-
-        # Estimate which octave the click landed in by interpolating click_x
-        # against the known keyboard x-span.
-        frac = max(0.0, min(1.0, click_x / max(frame_w - 1, 1)))
-        est_wi = lo_wi + frac * (hi_wi - lo_wi)
-
-        # Pitch class offsets within an octave (C=0, G=7, A=9)
-        PC = {"C": 0, "G": 7, "A": 9}
-
-        def _nearest_pitch(pc_name: str) -> int:
-            """MIDI pitch for pitch class nearest to est_wi within the keyboard range."""
-            pc = PC[pc_name]
-            best, best_d = low_pitch, float("inf")
-            for p in range(low_pitch, high_pitch + 1):
-                if p % 12 == pc:
-                    d = abs(pitch_to_white_index(p) - est_wi)
-                    if d < best_d:
-                        best_d, best = d, p
-            return best
-
-        root = tk.Tk()
-        root.withdraw()
-        picker = tk.Toplevel(root)
-        picker.title("Select key")
-
-        picker_w, picker_h = 200, 80
-        picker.update_idletasks()
-        screen_w = picker.winfo_screenwidth()
-        screen_h = picker.winfo_screenheight()
-        x = max(0, (screen_w - picker_w) // 2)
-        y = max(0, (screen_h - picker_h) // 2)
-        picker.geometry(f"{picker_w}x{picker_h}+{x}+{y}")
-
-        style = ttk.Style(picker)
-        style.configure("Key.TButton", font=("Arial", 14))
-
-        result = {"pitch": None}
-
-        def on_select(pc_name: str):
-            result["pitch"] = _nearest_pitch(pc_name)
-            picker.destroy()
-
-        frame = ttk.Frame(picker)
-        frame.pack(padx=10, pady=10, fill="both", expand=True)
-        row = ttk.Frame(frame)
-        row.pack(fill="x")
-        for name in ["A", "C", "G"]:
-            ttk.Button(
-                row, text=name, width=4, command=lambda n=name: on_select(n),
-                style="Key.TButton",
-            ).pack(side="left", padx=4, pady=2)
-
-        picker.protocol("WM_DELETE_WINDOW", picker.destroy)
-        picker.wait_window()
-        root.destroy()
-
-        if result["pitch"] is not None:
-            try:
-                pt = CalibPoint(pixel_xy=(float(click_x), float(click_y)), pitch=result["pitch"])
-                active = _get_active_points()
-                active.append(pt)
-                selected_idx = len(active) - 1
-            except ValueError as e:
-                print(f"Invalid key selection: {e}")
 
     def _draw_wrapped_hint(disp, segments, x, y, max_width, font_scale=0.7, line_height=26):
         """Draws '|'-joined hint segments as cv2 text, wrapping onto extra
@@ -998,7 +1023,9 @@ def interactive_calibrate(
             cv2.putText(disp, line, (x, ly), font, font_scale, (0, 255, 255), 1, cv2.LINE_AA)
         return len(lines)
 
-    cv2.namedWindow(window)
+    _build_picker_rects()
+    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window, frame_w, frame_h)
     cv2.setMouseCallback(window, on_click)
 
     ARROW_LEFT = {65361, 81, 2424832}
@@ -1058,19 +1085,64 @@ def interactive_calibrate(
         finish_hint = "ESC: finish" if (points and len(points) >= 4) or (not points and auto_calib is not None) else "ESC: finish (need 4+)"
         octave_hint = f" | Octave: {octave_offset:+d}" if octave_offset != 0 else ""
         rot_hint = f" | Rotation: {overlay_rotation:+.0f}°" if overlay_rotation != 0.0 else ""
+        scrub_hint = (f" | Frame {current_video_idx[0]}/{total_video_frames}"
+                      f"  ←/→: ±10  PgUp/Dn: ±150") if video_cap is not None else ""
         hint_segments = [
-            f"Click white keys ({len(points)} center, {len(points_near)} front)",
+            f"Click white keys ({len(points)} center, {len(points_near)} front){scrub_hint}",
             "f: toggle front-edge",
             "L-drag: move",
             "R-click / Del / x: remove",
             "Tab: select",
-            "Arrows: nudge",
+            "Arrows: nudge selected / scrub video",
             f"< / >: shift octave{auto_hint}",
             "[ / ]: rotate overlay",
-            f"U: undo",
+            "U: undo",
             f"{finish_hint}{mode_hint}{octave_hint}{rot_hint}",
         ]
         _draw_wrapped_hint(disp, hint_segments, 20, 40, frame_w - 40)
+
+        # Draw inline C-note picker when a click is pending.
+        if pending_click is not None:
+            px_click, py_click = int(pending_click[0]), int(pending_click[1])
+            cv2.circle(disp, (px_click, py_click), 7, (0, 200, 255), 2, cv2.LINE_AA)
+            # Semi-transparent dark strip at the bottom.
+            strip_y = frame_h - 62
+            overlay = disp.copy()
+            cv2.rectangle(overlay, (0, strip_y), (frame_w, frame_h), (20, 20, 20), -1)
+            cv2.addWeighted(overlay, 0.72, disp, 0.28, 0, disp)
+            # Compute auto-assumed next pitch.
+            _valid_pitches = [p for (_, _, _, _, p) in picker_rects]
+            _auto_pitch = None
+            if last_c_pitch[0] is not None:
+                _next = last_c_pitch[0] + 12
+                if _next in _valid_pitches:
+                    _auto_pitch = _next
+            if _auto_pitch is not None:
+                _auto_oct = (_auto_pitch // 12) - 1
+                _header = f"Which C note? (click anywhere = C{_auto_oct} auto  |  ESC to cancel)"
+            else:
+                _header = "Which C note did you click?  (ESC to cancel)"
+            cv2.putText(disp, _header,
+                        (12, strip_y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1, cv2.LINE_AA)
+            mx, my = mouse_pos
+            for (x1, y1, x2, y2, pitch) in picker_rects:
+                hovered = x1 <= mx <= x2 and y1 <= my <= y2
+                is_auto = pitch == _auto_pitch
+                if is_auto:
+                    fill = (60, 160, 220) if not hovered else (80, 200, 255)
+                    border = (140, 230, 255)
+                else:
+                    fill = (100, 190, 100) if hovered else (55, 120, 55)
+                    border = (180, 255, 180) if hovered else (100, 180, 100)
+                cv2.rectangle(disp, (x1, y1), (x2, y2), fill, -1)
+                cv2.rectangle(disp, (x1, y1), (x2, y2), border, 2 if is_auto else 1)
+                octave = (pitch // 12) - 1
+                label = f"C{octave}"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+                tx = x1 + (x2 - x1 - tw) // 2
+                ty = y1 + (y2 - y1 + th) // 2
+                cv2.putText(disp, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                            (255, 255, 255), 1, cv2.LINE_AA)
 
         cv2.imshow(window, disp)
         key = cv2.waitKeyEx(30)
@@ -1078,7 +1150,10 @@ def interactive_calibrate(
 
         if key == -1:
             continue
-        if key_ascii == 27:  # ESC: finish
+        if key_ascii == 27:  # ESC
+            if pending_click is not None:
+                pending_click = None
+                continue
             if points:
                 if len(points) >= 4:
                     break
@@ -1147,8 +1222,27 @@ def interactive_calibrate(
             y = min(max(y, 0), frame_h - 1)
             active[selected_idx].pixel_xy = (x, y)
             continue
+        # Video scrubbing — LEFT/RIGHT when no point is selected, PGUP/PGDN anytime.
+        # Only active when video_path was supplied.
+        PGUP_KEYS = {65365, 33, 2162688}   # PgUp across platforms
+        PGDN_KEYS = {65366, 34, 2228224}   # PgDn across platforms
+        if video_cap is not None and pending_click is None:
+            step = None
+            if key in ARROW_LEFT and selected_idx is None:
+                step = -10
+            elif key in ARROW_RIGHT and selected_idx is None:
+                step = 10
+            elif key in PGUP_KEYS:
+                step = -150
+            elif key in PGDN_KEYS:
+                step = 150
+            if step is not None:
+                current_video_idx[0] = max(0, min(total_video_frames - 1, current_video_idx[0] + step))
+                continue
 
     cv2.destroyWindow(window)
+    if video_cap is not None:
+        video_cap.release()
 
     if not points and auto_calib is not None:
         # User accepted the pure-auto overlay with no manual clicks --
