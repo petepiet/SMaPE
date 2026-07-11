@@ -49,13 +49,15 @@ def check_hand_leaps(
     for h in by_hand:
         by_hand[h].sort(key=lambda i: notes[i].start_sec)
 
-    def _fits(hand_seq, pos, pitch):
-        """Does `pitch` sit within max_leap of this hand's note just before or
-        just after position `pos` in its timeline? (i.e. reachable there)."""
-        for q in (pos - 1, pos + 1):
-            if 0 <= q < len(hand_seq):
-                if abs(int(notes[hand_seq[q]].pitch) - pitch) <= max_leap:
-                    return True
+    def _fits_outer(hand_seq, pos, direction, pitch):
+        """Does `pitch` reach this hand's note one step further out (in
+        `direction`: -1 = earlier, +1 = later) from `pos`? Only the note
+        BEYOND the leap pair tells us whether `pitch` fits this hand's own
+        line -- the immediate neighbour on the leap side IS the far note we're
+        comparing against, so checking it would be trivially false."""
+        q = pos + direction
+        if 0 <= q < len(hand_seq):
+            return abs(int(notes[hand_seq[q]].pitch) - pitch) <= max_leap
         return False
 
     violations = []
@@ -75,8 +77,8 @@ def check_hand_leaps(
             # also far (doesn't fit the hand's line), preferring to move the
             # lower-confidence one. `k`/`k+1` are each other's neighbour, so
             # check the note one further out on each side.
-            a_fits = _fits(seq, k, pa)      # does A line up with seq[k-1]?
-            b_fits = _fits(seq, k + 1, pb)  # does B line up with seq[k+2]?
+            a_fits = _fits_outer(seq, k, -1, pa)      # A vs its earlier neighbour seq[k-1]
+            b_fits = _fits_outer(seq, k + 1, +1, pb)  # B vs its later neighbour seq[k+2]
             if a_fits and not b_fits:
                 suspect = ib
             elif b_fits and not a_fits:

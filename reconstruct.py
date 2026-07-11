@@ -88,7 +88,15 @@ class ReconstructStats:
 
 
 def _wi(calib, x: float, y: float) -> float:
-    """Depth-invariant white-key index for a pixel, or raw x without calib."""
+    """Depth-invariant white-key index for a pixel.
+
+    Without a calibration this returns raw ``x`` unchanged -- callers in that
+    mode MUST already supply ``x`` in white-key-index units, because the
+    stage-3 thresholds (``SPIKE_KEYS`` etc.) are expressed in white keys and
+    would be meaningless against raw pixels (3 "keys" would mean 3 pixels).
+    The production pipeline always passes a real calib (see the call site in
+    extract_fingering.py); the calib-less path exists only for callers that
+    place points directly in key-index space."""
     if calib is None:
         return x
     try:
@@ -117,15 +125,18 @@ def _build_onset_index(midi_notes, offset_sec: float):
     return onsets
 
 
-def _is_midi_protected(onsets, t: float, wi: float,
+def _is_midi_protected(onsets, times, t: float, wi: float,
                        window: float, keys: float) -> bool:
     """True if a MIDI onset near time ``t`` expects a key near white-index
-    ``wi`` -- i.e. the suspect point is really a fast press, not a glitch."""
+    ``wi`` -- i.e. the suspect point is really a fast press, not a glitch.
+
+    ``times`` is the precomputed ``[o[0] for o in onsets]`` (onset times),
+    built once by the caller rather than on every call inside the spike loop.
+    """
     if not onsets:
         return False
     import bisect
 
-    times = [o[0] for o in onsets]
     lo = bisect.bisect_left(times, t - window)
     hi = bisect.bisect_right(times, t + window)
     for i in range(lo, hi):
@@ -159,6 +170,7 @@ def reconstruct_frames(
         return stats
 
     onsets = _build_onset_index(midi_notes, offset_sec)
+    onset_times = [o[0] for o in onsets]  # built once, reused per spike below
 
     # Group every tracked fingertip into per-(hand, finger) trajectories,
     # preserving frame order. Each entry keeps a direct reference to the
@@ -196,7 +208,7 @@ def reconstruct_frames(
                 and d_span <= span_ratio * min(d_prev, d_next)
             ):
                 stats.spikes_found += 1
-                if _is_midi_protected(onsets, t_cur, wi_cur, press_window_sec, press_keys):
+                if _is_midi_protected(onsets, onset_times, t_cur, wi_cur, press_window_sec, press_keys):
                     stats.midi_protected += 1
                     continue
                 to_remove.append((obs, tip))
