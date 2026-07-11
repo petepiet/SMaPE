@@ -8,6 +8,11 @@ __pycache__/
 calibration*.json
 fingering.json
 *.fingering.json
+# analysis artifacts written next to the output (transcribed/trimmed MIDI,
+# bundles) so they don't clutter the repo root as untracked files
+*.transcribed.mid
+*.render-trimmed.mid
+*.symple
 models/
 *.wav
 /log.txt

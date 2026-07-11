@@ -630,6 +630,15 @@ were unsure. All are on by default except skin-blob recovery.
 | **Skin-blob recovery** *(optional)* | An independent skin-colour tracker that splits two hands playing close together |
 | **Kinematic cleanup** | Drops physically-impossible "teleporting" fingertip glitches |
 
+## Benchmarking hand-assignment accuracy
+
+`benchmark.py` measures hand/finger accuracy against a human-corrected
+ground truth, so changes to the hand-assignment pipeline above can be
+judged against real numbers instead of by feel. See
+[`benchmark/README.md`](benchmark/README.md) for the authoring workflow
+(run SMaPE -> `benchmark.py init` -> hand-correct -> `benchmark.py`) and
+metric definitions.
+
 ## Earlier improvements
 
 - **Metadata support:** Song metadata (Artist, Title, Genre, Difficulty) is stored in `.symple` bundles and imported directly into Symplethesia

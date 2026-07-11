@@ -85,6 +85,7 @@ from match import (
     confidence_from_distance,
 )
 from batch import normalize_entries, plan_phase1
+from benchmark import join_notes, score, trim_notes
 
 
 class TestFailure(Exception):
@@ -1530,6 +1531,145 @@ def test_plan_phase1_all_saved():
     check(len(plan["reuse"]) == 3, f"expected all 3 entries to reuse, got {len(plan['reuse'])}")
 
 
+# ---------------------------------------------------------------------------
+# Benchmark harness (join_notes / score) tests
+# ---------------------------------------------------------------------------
+
+def test_join_notes_exact():
+    truth = [{"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1}]
+    pred = [{"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1}]
+    pairs = join_notes(truth, pred)
+    check(len(pairs) == 1, "expected one pair")
+    t, p = pairs[0]
+    check(p is not None, "exact same pitch+onset should match")
+    check(p["hand"] == "R", "matched pred should be the exact note")
+
+
+def test_join_notes_within_tolerance():
+    truth = [{"pitch": 60, "onsetSec": 1.00, "hand": "R", "finger": 1}]
+    pred_close = [{"pitch": 60, "onsetSec": 1.05, "hand": "R", "finger": 1}]
+    pairs = join_notes(truth, pred_close, sec_tol=0.1)
+    check(pairs[0][1] is not None, "0.05s offset within 0.1 tol should match")
+
+    pred_far = [{"pitch": 60, "onsetSec": 1.20, "hand": "R", "finger": 1}]
+    pairs_far = join_notes(truth, pred_far, sec_tol=0.1)
+    check(pairs_far[0][1] is None, "0.2s offset beyond 0.1 tol should not match")
+
+
+def test_join_notes_nearest_of_two():
+    truth = [{"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1}]
+    pred = [
+        {"pitch": 60, "onsetSec": 1.08, "hand": "R", "finger": 1},
+        {"pitch": 60, "onsetSec": 1.02, "hand": "L", "finger": 2},
+    ]
+    pairs = join_notes(truth, pred, sec_tol=0.1)
+    check(pairs[0][1] is not None, "should match one of the candidates")
+    check(pairs[0][1]["onsetSec"] == 1.02, "should pick the nearer onset (1.02, not 1.08)")
+
+    # The farther pred note should remain available for another truth note.
+    truth2 = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1},
+        {"pitch": 60, "onsetSec": 1.08, "hand": "R", "finger": 1},
+    ]
+    pairs2 = join_notes(truth2, pred, sec_tol=0.1)
+    matched_onsets = sorted(p["onsetSec"] for (_, p) in pairs2 if p is not None)
+    check(matched_onsets == [1.02, 1.08], f"both pred notes should be used, got {matched_onsets}")
+
+
+def test_join_notes_pred_used_once():
+    truth = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1},
+        {"pitch": 60, "onsetSec": 1.01, "hand": "R", "finger": 1},
+    ]
+    pred = [{"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1}]
+    pairs = join_notes(truth, pred, sec_tol=0.1)
+    matched = [p for (_, p) in pairs if p is not None]
+    check(len(matched) == 1, f"pred note should only be used once, got {len(matched)} matches")
+    none_count = sum(1 for (_, p) in pairs if p is None)
+    check(none_count == 1, "the second truth note should be left unmatched")
+
+
+def test_score_all_correct():
+    truth = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1},
+        {"pitch": 62, "onsetSec": 2.0, "hand": "L", "finger": 2},
+    ]
+    pred = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1},
+        {"pitch": 62, "onsetSec": 2.0, "hand": "L", "finger": 2},
+    ]
+    pairs = join_notes(truth, pred)
+    result = score(pairs)
+    check(approx(result["hand_accuracy"], 1.0), f"expected hand_accuracy 1.0, got {result['hand_accuracy']}")
+    check(approx(result["coverage"], 1.0), f"expected coverage 1.0, got {result['coverage']}")
+
+
+def test_score_one_wrong_hand():
+    truth = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1},
+        {"pitch": 62, "onsetSec": 2.0, "hand": "L", "finger": 2},
+        {"pitch": 64, "onsetSec": 3.0, "hand": "L", "finger": 3},
+    ]
+    pred = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "L", "finger": 1},  # wrong: truth R
+        {"pitch": 62, "onsetSec": 2.0, "hand": "L", "finger": 2},
+        {"pitch": 64, "onsetSec": 3.0, "hand": "L", "finger": 3},
+    ]
+    pairs = join_notes(truth, pred)
+    result = score(pairs)
+    check(result["matched"] == 3, f"expected 3 matched, got {result['matched']}")
+    check(approx(result["hand_accuracy"], 2 / 3), f"expected ~0.667, got {result['hand_accuracy']}")
+    check(result["confusion"]["R_as_L"] == 1, f"expected 1 R_as_L confusion, got {result['confusion']}")
+    check(result["confusion"]["L_as_R"] == 0, f"expected 0 L_as_R confusion, got {result['confusion']}")
+
+
+def test_score_coverage_with_miss():
+    truth = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1},
+        {"pitch": 62, "onsetSec": 2.0, "hand": "L", "finger": 2},
+    ]
+    pred = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1},
+        # no pred note for pitch 62 -> unmatched
+    ]
+    pairs = join_notes(truth, pred)
+    result = score(pairs)
+    check(result["labeled"] == 2, f"expected 2 labeled, got {result['labeled']}")
+    check(result["matched"] == 1, f"expected 1 matched, got {result['matched']}")
+    check(result["coverage"] < 1.0, f"expected coverage < 1.0, got {result['coverage']}")
+    check(approx(result["hand_accuracy"], 1.0), f"unmatched note should not penalize hand_accuracy: {result['hand_accuracy']}")
+
+
+def test_score_finger_accuracy():
+    truth = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1},
+        {"pitch": 62, "onsetSec": 2.0, "hand": "R", "finger": 2},
+        {"pitch": 64, "onsetSec": 3.0, "hand": "R", "finger": None},
+    ]
+    pred = [
+        {"pitch": 60, "onsetSec": 1.0, "hand": "R", "finger": 1},   # finger correct
+        {"pitch": 62, "onsetSec": 2.0, "hand": "R", "finger": 3},   # finger wrong
+        {"pitch": 64, "onsetSec": 3.0, "hand": "R", "finger": 5},   # truth has no finger label
+    ]
+    pairs = join_notes(truth, pred)
+    result = score(pairs)
+    check(result["finger_labeled"] == 2, f"expected 2 finger_labeled (null-finger truth excluded), got {result['finger_labeled']}")
+    check(result["finger_correct"] == 1, f"expected 1 finger_correct, got {result['finger_correct']}")
+    check(approx(result["finger_accuracy"], 0.5), f"expected 0.5 finger_accuracy, got {result['finger_accuracy']}")
+
+
+def test_trim_notes():
+    notes = [
+        {"pitch": 60, "onsetSec": 5.0, "hand": "L"},
+        {"pitch": 62, "onsetSec": 90.0, "hand": "R"},   # exactly at bound -> kept
+        {"pitch": 64, "onsetSec": 90.01, "hand": "R"},  # just past -> dropped
+        {"pitch": 65, "hand": "R"},                     # no onsetSec -> dropped
+    ]
+    kept = trim_notes(notes, 90.0)
+    check(len(kept) == 2, f"expected 2 notes kept (<=90s, with onsetSec), got {len(kept)}")
+    check(all(n["onsetSec"] <= 90.0 for n in kept), "all kept notes should be within the window")
+
+
 TESTS = [
     test_white_index_roundtrip,
     test_homography_known_corners_to_expected_pitches,
@@ -1623,6 +1763,15 @@ TESTS = [
     test_normalize_entries_id_only_builds_url,
     test_plan_phase1_channel_reuse,
     test_plan_phase1_all_saved,
+    test_join_notes_exact,
+    test_join_notes_within_tolerance,
+    test_join_notes_nearest_of_two,
+    test_join_notes_pred_used_once,
+    test_score_all_correct,
+    test_score_one_wrong_hand,
+    test_score_coverage_with_miss,
+    test_score_finger_accuracy,
+    test_trim_notes,
 ]
 
 
