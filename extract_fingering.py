@@ -1573,7 +1573,10 @@ def analyze(args: argparse.Namespace) -> dict:
 
         dropped_count = 0
         flagged_count = 0
-        depedaled_count = 0
+        # Render mode does no visual-release correction, but the shared summary
+        # line below prints this counter for both modes -- initialise it here so
+        # render runs don't hit an UnboundLocalError.
+        visual_release_count = 0
 
         # Rewrite the bundled MIDI so the app actually receives the
         # lit-key-trimmed note offsets (not just JSON metadata it never
