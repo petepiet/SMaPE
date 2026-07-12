@@ -1321,24 +1321,19 @@ def analyze(args: argparse.Namespace) -> dict:
                 allow_headless_reuse=getattr(args, "headless_reuse", False),
             )
 
-            # Also do hand-color picking from the (already fully downloaded)
-            # preview clip here, rather than waiting for the full video --
-            # the picker just needs *some* representative footage to scrub/
-            # click, not the complete video, so there's no reason to block
-            # on the (often much larger, slower) full download for this.
-            # Falls through to picking from the full video further below
-            # only if this never ran (preview download failed/unsupported,
-            # or --preview-seconds 0). If the default --preview-seconds
-            # (20s) doesn't show both hands' lit keys, pass a larger value.
-            if args.render and args.pick_hand_colors:
-                from render_hands import interactive_pick_hand_colors
-
-                print("Opening hand-color picker on the preview clip "
-                      "(scrub with arrow keys, click a lit key, ESC when done)...")
-                picked_hand_colors = interactive_pick_hand_colors(preview_path)
-                picked_hand_colors = _apply_hand_color_fallback_and_log(args.video, picked_hand_colors)
-                print(f"  picked colors: {picked_hand_colors}")
-
+            # NOTE: hand-color picking deliberately does NOT run here on the
+            # short preview clip. Unlike calibration (the keyboard position is
+            # constant, so a few seconds of footage suffice), colour picking
+            # must reach a frame where EACH reference key is lit -- in
+            # particular a black key for EACH hand. A ~20-45s preview often
+            # never shows one of them (observed: the right hand plays no black
+            # key inside the preview window, so RH_black could not be picked --
+            # only ~1200 frames were available). So colour picking waits for
+            # the full video below (see the `picked_hand_colors is None` block
+            # after the download), where every key eventually appears.
+            # Calibration above still overlaps the download; only the colour
+            # pick defers, and the download has usually finished during the
+            # interactive calibration anyway.
             print("Waiting for the full video download to finish...")
             download_thread.join()
             if "error" in download_result:
@@ -1371,16 +1366,15 @@ def analyze(args: argparse.Namespace) -> dict:
         args.out = os.path.join(args.output_dir, basename)
         print(f"Output directory set to: {args.output_dir}")
 
-    # Manual hand-color picking only needs SOME representative video to
-    # scrub/click, not any MIDI/transcription/calibration output -- normally
-    # already done above from the fast preview clip (see the early-preview
-    # block). This is the fallback for when that never ran (local file,
-    # preview download unsupported/failed, or --preview-seconds 0): only
-    # now, using the full video, do we have anything to pick from.
+    # Hand-color picking runs here, on the FULL video, so the user can scrub
+    # to a frame where each reference key (including a black key for each hand)
+    # is lit -- the short preview clip often doesn't show all of them (see the
+    # note in the early-preview block above). This is now the primary path for
+    # --render colour picking; it also covers local files and preview-less runs.
     if args.render and args.pick_hand_colors and picked_hand_colors is None:
-        # interactive_pick_hand_colors already imported above (~line 896-899,
-        # gated on the same args.render).
-        print("Opening hand-color picker (scrub with arrow keys, click a lit key, ESC when done)...")
+        from render_hands import interactive_pick_hand_colors  # lazy (also imported in the render block)
+        print("Opening hand-color picker on the full video "
+              "(scrub with arrow keys, click a lit key, ESC when done)...")
         picked_hand_colors = interactive_pick_hand_colors(video_path)
         picked_hand_colors = _apply_hand_color_fallback_and_log(args.video, picked_hand_colors)
         print(f"  picked colors: {picked_hand_colors}")
